@@ -2,9 +2,29 @@
 
 ## Overview
 
-This is a fork of [Envoy AI Gateway](https://github.com/envoyproxy/ai-gateway) with custom modifications for path-based routing support.
+This is a fork of [Envoy AI Gateway](https://github.com/envoyproxy/ai-gateway) with custom modifications for path-based routing and multiple InferencePool support.
 
 ## Key Modifications
+
+### Multiple InferencePool Backends with Session Affinity
+
+Added support for multiple InferencePool backends per rule with weighted routing and session affinity. This enables:
+- **Canary deployments**: Route 80% traffic to v1, 20% to v2
+- **A/B testing**: Split traffic between different model versions
+- **Session affinity**: Same user/session always routes to same pool (preserves KV cache locality)
+
+**New Types Added** (`api/v1alpha1/ai_gateway_route.go`):
+- `SessionAffinityConfig` - Configuration for session affinity
+- `HashSource` - Where to extract hash key (Header, RequestBody, QueryParam)
+- `SessionAffinityFallback` - Behavior when no hash key found (WeightedRandom, FirstBackend, RejectRequest)
+
+**Modified Files:**
+- `api/v1alpha1/ai_gateway_route.go` - Added SessionAffinity types, removed single-pool CEL validation
+- `internal/extproc/session_affinity.go` - **NEW** - Consistent hashing logic
+- `internal/extensionserver/weighted_inferencepool.go` - **NEW** - Weighted cluster generation
+- `internal/extensionserver/post_cluster_modify.go` - Handle multiple pools
+- `internal/extensionserver/post_route_modify.go` - Handle multiple pools
+- `internal/extensionserver/post_translate_modify.go` - Integrate weighted clusters
 
 ### Path-Based Routing Support
 
@@ -90,7 +110,9 @@ ai-gateway/
 └── tests/                  # Test suites
 ```
 
-## AIGatewayRoute Example (Path-Based)
+## AIGatewayRoute Examples
+
+### Path-Based Routing
 
 ```yaml
 apiVersion: aigateway.envoyproxy.io/v1alpha1
@@ -119,6 +141,48 @@ spec:
     - metadataKey: output_tokens
       type: OutputToken
 ```
+
+### Weighted InferencePool with Session Affinity (Canary)
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: llama3-canary
+  namespace: default
+spec:
+  parentRefs:
+    - name: ai-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: llama3-8b
+      backendRefs:
+        - name: vllm-llama3-8b-v1
+          group: inference.networking.k8s.io
+          kind: InferencePool
+          weight: 80    # 80% traffic to stable version
+        - name: vllm-llama3-8b-v2
+          group: inference.networking.k8s.io
+          kind: InferencePool
+          weight: 20    # 20% traffic to canary version
+      sessionAffinity:
+        hashOn:
+          - type: Header
+            name: X-Session-ID
+          - type: RequestBody
+            jsonPath: "$.user"
+        fallback: WeightedRandom
+```
+
+**Session Affinity Behavior:**
+- Same session ID → always same pool (preserves KV cache locality)
+- Distribution across all sessions ≈ 80/20 (statistical)
+- No storage needed - uses deterministic consistent hashing
 
 ## Known Issues
 
