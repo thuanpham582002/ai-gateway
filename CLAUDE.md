@@ -182,15 +182,27 @@ spec:
         hashOn:
           - type: Header
             name: X-Session-ID
-          - type: RequestBody
-            jsonPath: "$.user"
-        fallback: WeightedRandom
+          - type: QueryParam
+            name: user_id
 ```
 
 **Session Affinity Behavior:**
 - Same session ID → always same pool (preserves KV cache locality)
 - Distribution across all sessions ≈ 80/20 (statistical)
-- No storage needed - uses deterministic consistent hashing
+- No storage needed - uses native Envoy consistent hashing
+
+**Implementation Details:**
+- Uses Envoy's native `hash_policy` + `use_hash_policy` on `weighted_clusters`
+- `hash_policy` generates hash from request (header/query param)
+- `use_hash_policy: true` uses that hash for cluster selection (not random)
+
+**Supported HashOn Types:**
+- `Header` - Converted to Envoy `hash_policy.header`
+- `QueryParam` - Converted to Envoy `hash_policy.query_parameter`
+
+**Fallback Behavior:**
+- CRD `fallback` field is ignored
+- When no hash key found, Envoy automatically uses random weighted selection
 
 ## Known Issues
 
