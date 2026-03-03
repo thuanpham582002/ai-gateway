@@ -505,66 +505,35 @@ type SessionAffinityConfig struct {
 	// HashOn specifies sources to extract hash key from, in priority order.
 	// First non-empty value found will be used for consistent hashing.
 	// Same hash key always routes to the same pool (deterministic).
+	// When no hash key is found, Envoy falls back to random weighted selection.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxItems=5
 	HashOn []HashSource `json:"hashOn,omitempty"`
-
-	// Fallback specifies behavior when no hash key is found from any source.
-	// - WeightedRandom: Use random weighted selection (no affinity)
-	// - FirstBackend: Always route to first backend (100% to primary)
-	// - RejectRequest: Return error if session affinity is required
-	//
-	// +kubebuilder:default=WeightedRandom
-	// +kubebuilder:validation:Enum=WeightedRandom;FirstBackend;RejectRequest
-	Fallback SessionAffinityFallback `json:"fallback,omitempty"`
 }
 
 // HashSource defines a source to extract hash key from for session affinity.
 type HashSource struct {
 	// Type specifies the source type to extract the hash key from.
 	//
-	// +kubebuilder:validation:Enum=Header;RequestBody;QueryParam
+	// +kubebuilder:validation:Enum=Header;QueryParam
 	Type HashSourceType `json:"type"`
 
 	// Name of the header or query parameter.
-	// Required when Type is Header or QueryParam.
 	//
-	// +optional
-	Name string `json:"name,omitempty"`
-
-	// JSONPath to extract from request body.
-	// Required when Type is RequestBody.
-	// Uses JSONPath syntax: "$.user", "$.metadata.session_id", etc.
-	//
-	// +optional
-	JSONPath string `json:"jsonPath,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // HashSourceType specifies where to extract the hash key from.
 //
-// +kubebuilder:validation:Enum=Header;RequestBody;QueryParam
+// +kubebuilder:validation:Enum=Header;QueryParam
 type HashSourceType string
 
 const (
 	// HashSourceHeader extracts the hash key from an HTTP header.
 	HashSourceHeader HashSourceType = "Header"
-	// HashSourceRequestBody extracts the hash key from the request body using JSONPath.
-	HashSourceRequestBody HashSourceType = "RequestBody"
 	// HashSourceQueryParam extracts the hash key from a query parameter.
 	HashSourceQueryParam HashSourceType = "QueryParam"
-)
-
-// SessionAffinityFallback specifies what to do when no hash key is found.
-//
-// +kubebuilder:validation:Enum=WeightedRandom;FirstBackend;RejectRequest
-type SessionAffinityFallback string
-
-const (
-	// FallbackWeightedRandom uses random weighted selection when no hash key is found.
-	FallbackWeightedRandom SessionAffinityFallback = "WeightedRandom"
-	// FallbackFirstBackend always routes to the first backend when no hash key is found.
-	FallbackFirstBackend SessionAffinityFallback = "FirstBackend"
-	// FallbackRejectRequest returns an error when no hash key is found.
-	FallbackRejectRequest SessionAffinityFallback = "RejectRequest"
 )
