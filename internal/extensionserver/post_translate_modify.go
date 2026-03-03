@@ -459,16 +459,17 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 
 	// inferencePoolRoutes builds a matrix of route configs and the inference pools they use.
 	routeNameToRoute := make(map[string]*routev3.RouteConfiguration)
-	routeNameToVHRouteNameToInferencePool := make(map[string]map[string]*gwaiev1.InferencePool)
+	routeNameToVHRouteNameToInferencePools := make(map[string]map[string][]*gwaiev1.InferencePool)
 	for _, routeCfg := range routes {
 		routeNameToRoute[routeCfg.Name] = routeCfg
 		for _, vh := range routeCfg.VirtualHosts {
 			for _, route := range vh.Routes {
-				if pool := getInferencePoolByMetadata(route.Metadata); pool != nil {
-					if routeNameToVHRouteNameToInferencePool[routeCfg.Name] == nil {
-						routeNameToVHRouteNameToInferencePool[routeCfg.Name] = make(map[string]*gwaiev1.InferencePool)
+				pools := s.getInferencePoolsFromRoute(route)
+				if len(pools) > 0 {
+					if routeNameToVHRouteNameToInferencePools[routeCfg.Name] == nil {
+						routeNameToVHRouteNameToInferencePools[routeCfg.Name] = make(map[string][]*gwaiev1.InferencePool)
 					}
-					routeNameToVHRouteNameToInferencePool[routeCfg.Name][route.Name] = pool
+					routeNameToVHRouteNameToInferencePools[routeCfg.Name][route.Name] = pools
 				}
 			}
 		}
@@ -481,14 +482,16 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 			if routeNameToRoute[name] == nil {
 				continue
 			}
-			if routeNameToVHRouteNameToInferencePool[name] == nil {
+			if routeNameToVHRouteNameToInferencePools[name] == nil {
 				continue
 			}
-			for _, pool := range routeNameToVHRouteNameToInferencePool[name] {
-				if listenerToInferencePools[listener] == nil {
-					listenerToInferencePools[listener] = make([]*gwaiev1.InferencePool, 0)
+			for _, pools := range routeNameToVHRouteNameToInferencePools[name] {
+				for _, pool := range pools {
+					if listenerToInferencePools[listener] == nil {
+						listenerToInferencePools[listener] = make([]*gwaiev1.InferencePool, 0)
+					}
+					listenerToInferencePools[listener] = append(listenerToInferencePools[listener], pool)
 				}
-				listenerToInferencePools[listener] = append(listenerToInferencePools[listener], pool)
 			}
 		}
 	}
@@ -567,6 +570,18 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 					continue
 				}
 				poolFilters = append(poolFilters, eppExtProc)
+
+				// Add header mutation filter to copy EPP header to pool-specific header.
+				// This allows multiple EPP filters to coexist - each pool's endpoint is preserved
+				// in its own header, even if later EPP filters overwrite the original.
+				headerCopyFilter, err := buildEPPHeaderCopyFilter(pool)
+				if err != nil {
+					s.log.Error(err, "failed to build header copy filter", "pool", pool.Name)
+					continue
+				}
+				poolFilters = append(poolFilters, headerCopyFilter)
+				s.log.Info("added header copy filter for pool", "pool", pool.Name,
+					"target_header", endpointPickerHeaderForPool(pool))
 			}
 		}
 		if len(poolFilters) != 0 {
@@ -603,6 +618,17 @@ func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, infe
 		if err != nil {
 			return fmt.Errorf("failed to marshal ExtProcPerRoute to Any: %w", err)
 		}
+
+		// Check if this is a weighted InferencePool route
+		isWeightedRoute := s.isWeightedInferencePoolRoute(route)
+		if isWeightedRoute {
+			// For weighted routes, keep ALL EPP filters enabled.
+			// Each EPP filter sets a pool-specific header via header_mutation.
+			// ORIGINAL_DST clusters read their respective pool-specific headers.
+			s.log.Info("weighted route - keeping all EPP filters enabled", "route", route.Name)
+			continue
+		}
+
 		inferencePool := getInferencePoolByMetadata(route.Metadata)
 		if inferencePool == nil {
 			for key, pool := range inferenceMatrix {
@@ -788,6 +814,118 @@ func (s *Server) isRouteGeneratedByAIGateway(route *routev3.Route) bool {
 		}
 	}
 	return false
+}
+
+// isWeightedInferencePoolRoute checks if the route uses weighted InferencePools.
+func (s *Server) isWeightedInferencePoolRoute(route *routev3.Route) bool {
+	if route.Metadata == nil || route.Metadata.FilterMetadata == nil {
+		return false
+	}
+	aigwMeta, ok := route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace]
+	if !ok || aigwMeta.Fields == nil {
+		return false
+	}
+	_, hasWeightedPools := aigwMeta.Fields["weighted_inference_pools"]
+	return hasWeightedPools
+}
+
+// getInferencePoolsFromRoute extracts all InferencePools from a route.
+// This includes both the single pool from EG metadata AND any weighted pools.
+func (s *Server) getInferencePoolsFromRoute(route *routev3.Route) []*gwaiev1.InferencePool {
+	var pools []*gwaiev1.InferencePool
+	seen := make(map[string]bool) // Avoid duplicates by namespace/name
+
+	// First check for weighted_inference_pools metadata (set by maybeCreateWeightedInferencePoolClusters)
+	if route.Metadata != nil && route.Metadata.FilterMetadata != nil {
+		if aigwMeta, ok := route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace]; ok && aigwMeta.Fields != nil {
+			if weightedPoolsValue, ok := aigwMeta.Fields["weighted_inference_pools"]; ok {
+				if listVal := weightedPoolsValue.GetListValue(); listVal != nil {
+					for _, poolValue := range listVal.Values {
+						if poolStruct := poolValue.GetStructValue(); poolStruct != nil && poolStruct.Fields != nil {
+							poolName := ""
+							poolNamespace := ""
+							if nameVal, ok := poolStruct.Fields["name"]; ok {
+								poolName = nameVal.GetStringValue()
+							}
+							if nsVal, ok := poolStruct.Fields["namespace"]; ok {
+								poolNamespace = nsVal.GetStringValue()
+							}
+							if poolName != "" && poolNamespace != "" {
+								key := poolNamespace + "/" + poolName
+								if !seen[key] {
+									seen[key] = true
+									// Fetch the InferencePool from the API
+									var pool gwaiev1.InferencePool
+									if err := s.k8sClient.Get(context.Background(),
+										client.ObjectKey{Namespace: poolNamespace, Name: poolName}, &pool); err == nil {
+										pools = append(pools, &pool)
+									} else {
+										s.log.Error(err, "failed to get weighted InferencePool",
+											"namespace", poolNamespace, "name", poolName)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If we found weighted pools, return them
+	if len(pools) > 0 {
+		return pools
+	}
+
+	// Fall back to single pool from EG metadata
+	if pool := getInferencePoolByMetadata(route.Metadata); pool != nil {
+		return []*gwaiev1.InferencePool{pool}
+	}
+
+	return nil
+}
+
+// buildEPPHeaderCopyFilter creates a header_mutation filter that copies the EPP endpoint header
+// to a pool-specific header. This allows multiple EPP filters to coexist without overwriting
+// each other's endpoint selections.
+func buildEPPHeaderCopyFilter(pool *gwaiev1.InferencePool) (*httpconnectionmanagerv3.HttpFilter, error) {
+	targetHeader := endpointPickerHeaderForPool(pool)
+
+	// Create header mutation that copies the EPP header to pool-specific header
+	mutation := &header_mutationv3.HeaderMutation{
+		Mutations: &header_mutationv3.Mutations{
+			RequestMutations: []*mutation_rulesv3.HeaderMutation{
+				{
+					Action: &mutation_rulesv3.HeaderMutation_Append{
+						Append: &corev3.HeaderValueOption{
+							AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+							Header: &corev3.HeaderValue{
+								Key: targetHeader,
+								// Copy value from the original EPP header using Envoy's %REQ()% syntax
+								Value: `%REQ(` + internalapi.EndpointPickerHeaderKey + `)%`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	mutationAny, err := toAny(mutation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal header mutation: %w", err)
+	}
+
+	return &httpconnectionmanagerv3.HttpFilter{
+		Name:       fmt.Sprintf("envoy.filters.http.header_mutation/epp_copy_%s_%s", pool.Namespace, pool.Name),
+		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{TypedConfig: mutationAny},
+	}, nil
+}
+
+// endpointPickerHeaderForPool returns the header name used for endpoint selection for a specific pool.
+// Each pool uses a unique header to allow multiple EPP filters to coexist without conflicts.
+func endpointPickerHeaderForPool(pool *gwaiev1.InferencePool) string {
+	return fmt.Sprintf("x-gateway-destination-%s-%s", pool.Namespace, pool.Name)
 }
 
 // setClusterMetadataBackendName sets the backend name on cluster-level metadata.
