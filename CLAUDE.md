@@ -120,6 +120,23 @@ spec:
       type: OutputToken
 ```
 
+## Known Issues
+
+### CEL Validation Budget Exceeded (Path field)
+
+**Issue:** Adding `Path *gwapiv1.HTTPPathMatch` to `AIGatewayRouteRuleMatch` imports 11 CEL validation rules from Gateway API. Combined with existing AIGatewayRoute validations, total cost exceeds Kubernetes CRD budget (~138% of limit).
+
+**Current Workaround:** Removed CEL validations from Path field in CRD manifest (`manifests/charts/ai-gateway-crds-helm/templates/aigateway.envoyproxy.io_aigatewayroutes.yaml`). Envoy still validates paths at runtime.
+
+**Proper Fix (TODO):**
+1. Define custom `SimplifiedPathMatch` type with minimal/no CEL validations
+2. Or refactor existing AIGatewayRoute validations to reduce total cost
+3. Add back essential validation: `self.value.startsWith('/')`
+
+**Risk:** Low - invalid paths return 404 at runtime, no security issue.
+
+---
+
 ## Upstream Sync
 
 ```bash
