@@ -303,6 +303,9 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 			}
 		}
 		var matches []gwapiv1.HTTPRouteMatch
+		var ruleFilters []gwapiv1.HTTPRouteFilter
+		ruleFilters = append(ruleFilters, rewriteFilters...)
+
 		for j := range rule.Matches {
 			// Use specified Path or fall back to rootPrefix
 			pathMatch := &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix}
@@ -314,11 +317,33 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Headers: rule.Matches[j].Headers,
 				Path:    pathMatch,
 			})
+
+			// Add URLRewrite filter if PathRewrite is specified
+			if rule.Matches[j].PathRewrite != nil {
+				urlRewrite := &gwapiv1.HTTPURLRewriteFilter{}
+				if rule.Matches[j].PathRewrite.ReplacePrefixMatch != nil {
+					urlRewrite.Path = &gwapiv1.HTTPPathModifier{
+						Type:               gwapiv1.PrefixMatchHTTPPathModifier,
+						ReplacePrefixMatch: rule.Matches[j].PathRewrite.ReplacePrefixMatch,
+					}
+				} else if rule.Matches[j].PathRewrite.ReplaceFullPath != nil {
+					urlRewrite.Path = &gwapiv1.HTTPPathModifier{
+						Type:            gwapiv1.FullPathHTTPPathModifier,
+						ReplaceFullPath: rule.Matches[j].PathRewrite.ReplaceFullPath,
+					}
+				}
+				if urlRewrite.Path != nil {
+					ruleFilters = append(ruleFilters, gwapiv1.HTTPRouteFilter{
+						Type:       gwapiv1.HTTPRouteFilterURLRewrite,
+						URLRewrite: urlRewrite,
+					})
+				}
+			}
 		}
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			BackendRefs: backendRefs,
 			Matches:     matches,
-			Filters:     rewriteFilters,
+			Filters:     ruleFilters,
 			Timeouts:    rule.GetTimeoutsOrDefault(),
 		})
 	}
