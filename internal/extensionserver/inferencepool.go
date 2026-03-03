@@ -133,6 +133,9 @@ func getInferencePoolByMetadata(meta *corev3.Metadata) *gwaiev1.InferencePool {
 // encoded as a string in the format: "namespace/name/serviceName/port".
 func buildEPPMetadataForCluster(cluster *clusterv3.Cluster, inferencePool *gwaiev1.InferencePool) {
 	// Initialize cluster metadata structure if not present.
+	if cluster.Metadata == nil {
+		cluster.Metadata = &corev3.Metadata{}
+	}
 	buildEPPMetadata(cluster.Metadata, inferencePool)
 }
 

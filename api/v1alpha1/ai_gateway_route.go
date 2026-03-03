@@ -189,7 +189,6 @@ type AIGatewayRouteSpec struct {
 // AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayRoute.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind)) || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))", message="cannot mix InferencePool and AIServiceBackend references in the same rule"
-// +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind)) || size(self.backendRefs) == 1", message="only one InferencePool backend is allowed per rule"
 type AIGatewayRouteRule struct {
 	// BackendRefs is the list of backends that this rule will route the traffic to.
 	// Each backend can have a weight that determines the traffic distribution.
@@ -202,8 +201,9 @@ type AIGatewayRouteRule struct {
 	//
 	// BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources
 	// from the Gateway API Inference Extension. When referencing InferencePool resources:
-	// - Only one InferencePool backend is allowed per rule
+	// - Multiple InferencePool backends are supported with weights for canary/A-B testing
 	// - Cannot mix InferencePool with AIServiceBackend references in the same rule
+	// - Use SessionAffinity to preserve EPP scheduler patterns (KV cache locality)
 	// - Fallback behavior is handled by the InferencePool's endpoint picker
 	//
 	// For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends
@@ -260,6 +260,18 @@ type AIGatewayRouteRule struct {
 	// +optional
 	// +kubebuilder:validation:Format=date-time
 	ModelsCreatedAt *metav1.Time `json:"modelsCreatedAt,omitempty"`
+
+	// SessionAffinity configures session affinity for weighted InferencePool routing.
+	// When multiple InferencePool backends are specified with weights, this ensures
+	// requests from the same session/user are consistently routed to the same pool,
+	// preserving EPP scheduler patterns like KV cache locality.
+	//
+	// This field is only used when multiple InferencePool backends are referenced
+	// in the same rule. For single InferencePool or AIServiceBackend references,
+	// this field is ignored.
+	//
+	// +optional
+	SessionAffinity *SessionAffinityConfig `json:"sessionAffinity,omitempty"`
 }
 
 // AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
@@ -483,3 +495,76 @@ type HTTPBodyField struct {
 	// +kubebuilder:validation:Required
 	Value string `json:"value"`
 }
+
+// SessionAffinityConfig defines how to maintain session affinity
+// when routing between multiple weighted InferencePool backends.
+// This ensures requests from the same session/user are consistently
+// routed to the same pool, preserving EPP scheduler patterns like
+// KV cache locality and prefix caching.
+type SessionAffinityConfig struct {
+	// HashOn specifies sources to extract hash key from, in priority order.
+	// First non-empty value found will be used for consistent hashing.
+	// Same hash key always routes to the same pool (deterministic).
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=5
+	HashOn []HashSource `json:"hashOn,omitempty"`
+
+	// Fallback specifies behavior when no hash key is found from any source.
+	// - WeightedRandom: Use random weighted selection (no affinity)
+	// - FirstBackend: Always route to first backend (100% to primary)
+	// - RejectRequest: Return error if session affinity is required
+	//
+	// +kubebuilder:default=WeightedRandom
+	// +kubebuilder:validation:Enum=WeightedRandom;FirstBackend;RejectRequest
+	Fallback SessionAffinityFallback `json:"fallback,omitempty"`
+}
+
+// HashSource defines a source to extract hash key from for session affinity.
+type HashSource struct {
+	// Type specifies the source type to extract the hash key from.
+	//
+	// +kubebuilder:validation:Enum=Header;RequestBody;QueryParam
+	Type HashSourceType `json:"type"`
+
+	// Name of the header or query parameter.
+	// Required when Type is Header or QueryParam.
+	//
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// JSONPath to extract from request body.
+	// Required when Type is RequestBody.
+	// Uses JSONPath syntax: "$.user", "$.metadata.session_id", etc.
+	//
+	// +optional
+	JSONPath string `json:"jsonPath,omitempty"`
+}
+
+// HashSourceType specifies where to extract the hash key from.
+//
+// +kubebuilder:validation:Enum=Header;RequestBody;QueryParam
+type HashSourceType string
+
+const (
+	// HashSourceHeader extracts the hash key from an HTTP header.
+	HashSourceHeader HashSourceType = "Header"
+	// HashSourceRequestBody extracts the hash key from the request body using JSONPath.
+	HashSourceRequestBody HashSourceType = "RequestBody"
+	// HashSourceQueryParam extracts the hash key from a query parameter.
+	HashSourceQueryParam HashSourceType = "QueryParam"
+)
+
+// SessionAffinityFallback specifies what to do when no hash key is found.
+//
+// +kubebuilder:validation:Enum=WeightedRandom;FirstBackend;RejectRequest
+type SessionAffinityFallback string
+
+const (
+	// FallbackWeightedRandom uses random weighted selection when no hash key is found.
+	FallbackWeightedRandom SessionAffinityFallback = "WeightedRandom"
+	// FallbackFirstBackend always routes to the first backend when no hash key is found.
+	FallbackFirstBackend SessionAffinityFallback = "FirstBackend"
+	// FallbackRejectRequest returns an error when no hash key is found.
+	FallbackRejectRequest SessionAffinityFallback = "RejectRequest"
+)

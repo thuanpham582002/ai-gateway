@@ -71,6 +71,28 @@ func (s *Server) PostTranslateModify(_ context.Context, req *egextension.PostTra
 	}
 	req.Clusters = append(req.Clusters, cs...)
 
+	// Create weighted clusters for routes with multiple InferencePool backends.
+	// This enables canary/A-B testing with weighted traffic splitting between pools.
+	weightedClusters, err := s.maybeCreateWeightedInferencePoolClusters(req.Routes, req.Clusters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create weighted InferencePool clusters: %w", err)
+	}
+
+	// Process weighted clusters to add upstream ext_proc filters
+	for _, cluster := range weightedClusters {
+		if err := s.maybeModifyCluster(cluster); err != nil {
+			return nil, fmt.Errorf("failed to modify weighted cluster %s: %w", cluster.Name, err)
+		}
+	}
+	req.Clusters = append(req.Clusters, weightedClusters...)
+
+	// Build EPP clusters for the newly created weighted clusters
+	eppClustersForWeighted, err := buildClustersForInferencePoolEndpointPickers(weightedClusters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build EPP clusters for weighted InferencePools: %w", err)
+	}
+	req.Clusters = append(req.Clusters, eppClustersForWeighted...)
+
 	// Modify listeners and routes to support InferencePool backends.
 	if err = s.maybeModifyListenerAndRoutes(req.Listeners, req.Routes); err != nil {
 		return nil, fmt.Errorf("failed to modify listeners and routes for InferencePool support: %w", err)
@@ -162,6 +184,19 @@ func (s *Server) PostTranslateModify(_ context.Context, req *egextension.PostTra
 // The resulting configuration is similar to the envoy.yaml files in tests/data-plane/.
 // Only clusters with names matching the AIGatewayRoute pattern are modified.
 func (s *Server) maybeModifyCluster(cluster *clusterv3.Cluster) error {
+	// Check if this is a weighted InferencePool cluster (created by maybeCreateWeightedInferencePoolClusters).
+	// These clusters have InferencePool metadata and need the upstream ext_proc filter.
+	if strings.HasPrefix(cluster.Name, weightedInferencePoolClusterPrefix) {
+		s.log.Info("detected weighted InferencePool cluster", "cluster", cluster.Name, "metadata_nil", cluster.Metadata == nil)
+		pool := getInferencePoolByMetadata(cluster.Metadata)
+		if pool != nil {
+			s.log.Info("configuring weighted InferencePool cluster", "cluster", cluster.Name, "pool", pool.Name)
+			return s.addUpstreamExtProcFilter(cluster)
+		} else {
+			s.log.Info("weighted cluster has no InferencePool metadata", "cluster", cluster.Name)
+		}
+	}
+
 	// Parse cluster name to extract AIGatewayRoute information.
 	// Expected format: "httproute/<namespace>/<name>/rule/<index_of_rule>".
 	parts := strings.Split(cluster.Name, "/")
@@ -255,11 +290,29 @@ func (s *Server) maybeModifyCluster(cluster *clusterv3.Cluster) error {
 			}
 		}
 	} else {
-		// we can only specify one backend in a rule for InferencePool.
-		backendRef := httpRouteRule.BackendRefs[0]
-		setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, 0)
+		// InferencePool backend(s). Find the backend that matches this pool.
+		// For weighted routing with multiple InferencePools, each pool gets its own cluster
+		// and we need to find the matching backendRef by pool name.
+		poolName := pool.Name
+		backendRefIndex := 0
+		for i, backendRef := range httpRouteRule.BackendRefs {
+			if backendRef.Name == poolName {
+				backendRefIndex = i
+				break
+			}
+		}
+		if backendRefIndex < len(httpRouteRule.BackendRefs) {
+			backendRef := httpRouteRule.BackendRefs[backendRefIndex]
+			setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, backendRefIndex)
+		}
 	}
 
+	return s.addUpstreamExtProcFilter(cluster)
+}
+
+// addUpstreamExtProcFilter adds the AI Gateway upstream ext_proc filter to a cluster.
+// This filter handles request/response processing at the upstream level.
+func (s *Server) addUpstreamExtProcFilter(cluster *clusterv3.Cluster) error {
 	if cluster.TypedExtensionProtocolOptions == nil {
 		cluster.TypedExtensionProtocolOptions = make(map[string]*anypb.Any)
 	}
@@ -267,7 +320,7 @@ func (s *Server) maybeModifyCluster(cluster *clusterv3.Cluster) error {
 	var po *httpv3.HttpProtocolOptions
 	if raw, ok := cluster.TypedExtensionProtocolOptions[httpProtocolOptions]; ok {
 		po = &httpv3.HttpProtocolOptions{}
-		if err = raw.UnmarshalTo(po); err != nil {
+		if err := raw.UnmarshalTo(po); err != nil {
 			s.log.Error(err, "failed to unmarshal HttpProtocolOptions", "cluster_name", cluster.Name)
 			return fmt.Errorf("failed to unmarshal HttpProtocolOptions: %w", err)
 		}
