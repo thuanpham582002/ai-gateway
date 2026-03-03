@@ -371,6 +371,16 @@ type AIGatewayRouteRuleMatch struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	Headers []gwapiv1.HTTPHeaderMatch `json:"headers,omitempty"`
+
+	// Path specifies HTTP request path matcher. See HTTPPathMatch in the Gateway API for the details:
+	// https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPPathMatch
+	//
+	// If not specified, the default rootPrefix path will be used.
+	// Use this field for Vertex AI-style path-based routing:
+	// /v1/projects/{project}/locations/{region}/endpoints/{id}
+	//
+	// +optional
+	Path *gwapiv1.HTTPPathMatch `json:"path,omitempty"`
 }
 
 type AIGatewayFilterConfig struct {
