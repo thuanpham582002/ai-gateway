@@ -585,6 +585,9 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [HTTPBodyField](#httpbodyfield)
 - [HTTPBodyMutation](#httpbodymutation)
 - [HTTPHeaderMutation](#httpheadermutation)
+- [HTTPPathRewrite](#httppathrewrite)
+- [HashSource](#hashsource)
+- [HashSourceType](#hashsourcetype)
 - [JWKS](#jwks)
 - [JWTSource](#jwtsource)
 - [LLMRequestCost](#llmrequestcost)
@@ -610,6 +613,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [QuotaRule](#quotarule)
 - [QuotaValue](#quotavalue)
 - [ServiceQuotaDefinition](#servicequotadefinition)
+- [SessionAffinityConfig](#sessionaffinityconfig)
 - [ToolCall](#toolcall)
 - [VersionedAPISchema](#versionedapischema)
 
@@ -631,7 +635,7 @@ AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayR
   name="backendRefs"
   type="[AIGatewayRouteRuleBackendRef](#aigatewayrouterulebackendref) array"
   required="false"
-  description="BackendRefs is the list of backends that this rule will route the traffic to.<br />Each backend can have a weight that determines the traffic distribution.<br />The namespace of each backend defaults to the same namespace as the AIGatewayRoute when not specified.<br />Cross-namespace references are supported by specifying the namespace field.<br />When a namespace different than the AIGatewayRoute's namespace is specified,<br />a ReferenceGrant object is required in the referent namespace to allow that<br />namespace's owner to accept the reference.<br />BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources<br />from the Gateway API Inference Extension. When referencing InferencePool resources:<br />- Only one InferencePool backend is allowed per rule<br />- Cannot mix InferencePool with AIServiceBackend references in the same rule<br />- Fallback behavior is handled by the InferencePool's endpoint picker<br />For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends<br />combined with the BackendTrafficPolicy of Envoy Gateway.<br />Please refer to https://gateway.envoyproxy.io/docs/tasks/traffic/failover/ as well as<br />https://gateway.envoyproxy.io/docs/tasks/traffic/retry/."
+  description="BackendRefs is the list of backends that this rule will route the traffic to.<br />Each backend can have a weight that determines the traffic distribution.<br />The namespace of each backend defaults to the same namespace as the AIGatewayRoute when not specified.<br />Cross-namespace references are supported by specifying the namespace field.<br />When a namespace different than the AIGatewayRoute's namespace is specified,<br />a ReferenceGrant object is required in the referent namespace to allow that<br />namespace's owner to accept the reference.<br />BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources<br />from the Gateway API Inference Extension. When referencing InferencePool resources:<br />- Multiple InferencePool backends are supported with weights for canary/A-B testing<br />- Cannot mix InferencePool with AIServiceBackend references in the same rule<br />- Use SessionAffinity to preserve EPP scheduler patterns (KV cache locality)<br />- Fallback behavior is handled by the InferencePool's endpoint picker<br />For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends<br />combined with the BackendTrafficPolicy of Envoy Gateway.<br />Please refer to https://gateway.envoyproxy.io/docs/tasks/traffic/failover/ as well as<br />https://gateway.envoyproxy.io/docs/tasks/traffic/retry/."
 /><ApiField
   name="matches"
   type="[AIGatewayRouteRuleMatch](#aigatewayrouterulematch) array"
@@ -653,6 +657,11 @@ AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayR
   type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.29/#time-v1-meta)"
   required="false"
   description="ModelsCreatedAt represents the creation timestamp of the running models serving by the backends,<br />which will be exported as the field of `Created` in openai-compatible API `/models`.<br />It follows the format of RFC 3339, for example `2024-05-21T10:00:00Z`.<br />This is used only when this rule contains `x-ai-eg-model` in its header matching<br />where the header value will be recognized as a `model` in `/models` endpoint.<br />All the matched models will share the same creation time.<br />Default to the creation timestamp of the AIGatewayRoute if not set."
+/><ApiField
+  name="sessionAffinity"
+  type="[SessionAffinityConfig](#sessionaffinityconfig)"
+  required="false"
+  description="SessionAffinity configures session affinity for weighted InferencePool routing.<br />When multiple InferencePool backends are specified with weights, this ensures<br />requests from the same session/user are consistently routed to the same pool,<br />preserving EPP scheduler patterns like KV cache locality.<br />This field is only used when multiple InferencePool backends are referenced<br />in the same rule. For single InferencePool or AIServiceBackend references,<br />this field is ignored."
 />
 
 
@@ -694,7 +703,7 @@ It can reference either an AIServiceBackend or an InferencePool resource.
   name="modelNameOverride"
   type="string"
   required="false"
-  description="Name of the model in the backend. If provided this will override the name provided in the request.<br />This field is ignored when referencing InferencePool resources."
+  description="Name of the model in the backend. If provided this will override the name provided in the request.<br />For InferencePool backends, this overrides the model name sent to the inference endpoint."
 /><ApiField
   name="headerMutation"
   type="[HTTPHeaderMutation](#httpheadermutation)"
@@ -738,6 +747,16 @@ It can reference either an AIServiceBackend or an InferencePool resource.
   type="[HTTPHeaderMatch](https://gateway-api.sigs.k8s.io/reference/spec/?h=httproutetimeouts#httpheadermatch) array"
   required="false"
   description="Headers specifies HTTP request header matchers. See HeaderMatch in the Gateway API for the details:<br />https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPHeaderMatch"
+/><ApiField
+  name="path"
+  type="[HTTPPathMatch](#httppathmatch)"
+  required="false"
+  description="Path specifies HTTP request path matcher. See HTTPPathMatch in the Gateway API for the details:<br />https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPPathMatch<br />If not specified, the default rootPrefix path will be used.<br />Use this field for Vertex AI-style path-based routing:<br />/v1/projects/\{project\}/locations/\{region\}/endpoints/\{id\}"
+/><ApiField
+  name="pathRewrite"
+  type="[HTTPPathRewrite](#httppathrewrite)"
+  required="false"
+  description="PathRewrite specifies how to rewrite the path before forwarding to the backend.<br />This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)<br />needs to be rewritten to what the backend expects (e.g., /v1/completions).<br />When using ReplacePrefixMatch, the matched prefix from Path will be replaced with<br />the value specified here. For example:<br />  Path: /v1/projects/myproject/locations/default/endpoints/abc123 (PathPrefix)<br />  PathRewrite: /v1 (ReplacePrefixMatch)<br />  Request: /v1/projects/myproject/locations/default/endpoints/abc123/completions<br />  Result:  /v1/completions"
 />
 
 
@@ -1599,6 +1618,88 @@ HTTPHeaderMutation defines the mutation of HTTP headers that will be applied to 
 />
 
 
+#### HTTPPathRewrite
+
+
+
+**Appears in:**
+- [AIGatewayRouteRuleMatch](#aigatewayrouterulematch)
+
+HTTPPathRewrite defines how to rewrite the path of incoming requests.
+
+##### Fields
+
+
+
+<ApiField
+  name="type"
+  type="string"
+  required="true"
+  defaultValue="ReplacePrefixMatch"
+  description="Type specifies the type of path rewrite."
+/><ApiField
+  name="replacePrefixMatch"
+  type="string"
+  required="false"
+  description="ReplacePrefixMatch specifies the value to replace the matched prefix with.<br />Only valid when Type is ReplacePrefixMatch."
+/><ApiField
+  name="replaceFullPath"
+  type="string"
+  required="false"
+  description="ReplaceFullPath specifies the value to replace the entire path with.<br />Only valid when Type is ReplaceFullPath."
+/>
+
+
+#### HashSource
+
+
+
+**Appears in:**
+- [SessionAffinityConfig](#sessionaffinityconfig)
+
+HashSource defines a source to extract hash key from for session affinity.
+
+##### Fields
+
+
+
+<ApiField
+  name="type"
+  type="[HashSourceType](#hashsourcetype)"
+  required="true"
+  description="Type specifies the source type to extract the hash key from."
+/><ApiField
+  name="name"
+  type="string"
+  required="true"
+  description="Name of the header or query parameter."
+/>
+
+
+#### HashSourceType
+
+**Underlying type:** string
+
+**Appears in:**
+- [HashSource](#hashsource)
+
+HashSourceType specifies where to extract the hash key from.
+
+
+
+##### Possible Values
+
+<ApiField
+  name="Header"
+  type="enum"
+  required="false"
+  description="HashSourceHeader extracts the hash key from an HTTP header.<br />"
+/><ApiField
+  name="QueryParam"
+  type="enum"
+  required="false"
+  description="HashSourceQueryParam extracts the hash key from a query parameter.<br />"
+/>
 #### JWKS
 
 
@@ -2388,6 +2489,31 @@ QuotaValue defines the quota limits using sliding window.
   type="[QuotaValue](#quotavalue)"
   required="true"
   description="Quota value applicable to all requests.<br />A response with 429 HTTP status code is sent back to the client when<br />the selected requests have exceeded the quota."
+/>
+
+
+#### SessionAffinityConfig
+
+
+
+**Appears in:**
+- [AIGatewayRouteRule](#aigatewayrouterule)
+
+SessionAffinityConfig defines how to maintain session affinity
+when routing between multiple weighted InferencePool backends.
+This ensures requests from the same session/user are consistently
+routed to the same pool, preserving EPP scheduler patterns like
+KV cache locality and prefix caching.
+
+##### Fields
+
+
+
+<ApiField
+  name="hashOn"
+  type="[HashSource](#hashsource) array"
+  required="false"
+  description="HashOn specifies sources to extract hash key from, in priority order.<br />First non-empty value found will be used for consistent hashing.<br />Same hash key always routes to the same pool (deterministic).<br />When no hash key is found, Envoy falls back to random weighted selection."
 />
 
 

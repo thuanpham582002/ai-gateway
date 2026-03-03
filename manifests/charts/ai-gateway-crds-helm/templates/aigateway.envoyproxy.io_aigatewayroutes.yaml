@@ -1396,7 +1396,7 @@ spec:
                           modelNameOverride:
                             description: |-
                               Name of the model in the backend. If provided this will override the name provided in the request.
-                              This field is ignored when referencing InferencePool resources.
+                              For InferencePool backends, this overrides the model name sent to the inference endpoint.
                             type: string
                           name:
                             description: |-

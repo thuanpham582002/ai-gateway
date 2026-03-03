@@ -318,7 +318,7 @@ type AIGatewayRouteRuleBackendRef struct {
 	Kind *string `json:"kind,omitempty"`
 
 	// Name of the model in the backend. If provided this will override the name provided in the request.
-	// This field is ignored when referencing InferencePool resources.
+	// For InferencePool backends, this overrides the model name sent to the inference endpoint.
 	//
 	// +optional
 	ModelNameOverride string `json:"modelNameOverride,omitempty"`
