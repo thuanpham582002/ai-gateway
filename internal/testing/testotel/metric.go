@@ -36,6 +36,29 @@ func GetCounterValue(t testing.TB, reader metric.Reader, metric string, attrs at
 	return 0.0
 }
 
+// GetInt64CounterValue returns the value of an Int64Counter metric with the given attributes.
+func GetInt64CounterValue(t testing.TB, reader metric.Reader, metricName string, attrs attribute.Set) int64 {
+	var data metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &data))
+
+	for _, sm := range data.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != metricName {
+				continue
+			}
+			d := m.Data.(metricdata.Sum[int64])
+			for _, dp := range d.DataPoints {
+				if dp.Attributes.Equals(&attrs) {
+					return dp.Value
+				}
+			}
+		}
+	}
+
+	t.Fatalf("no int64 counter value found for metric %s with attributes: %v", metricName, attrs)
+	return 0
+}
+
 // GetHistogramValues returns the count and sum of a histogram metric with the given attributes.
 func GetHistogramValues(t testing.TB, reader metric.Reader, metric string, attrs attribute.Set) (uint64, float64) {
 	var data metricdata.ResourceMetrics

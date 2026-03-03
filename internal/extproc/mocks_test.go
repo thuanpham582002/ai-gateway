@@ -256,7 +256,7 @@ func (m *mockMetrics) GetInterTokenLatencyMs() float64 {
 }
 
 // RecordRequestCompletion implements [metrics.Metrics].
-func (m *mockMetrics) RecordRequestCompletion(_ context.Context, success bool, _ map[string]string) {
+func (m *mockMetrics) RecordRequestCompletion(_ context.Context, success bool, _ metrics.GenAIErrorType, _ map[string]string) {
 	if success {
 		m.requestSuccessCount++
 	} else {

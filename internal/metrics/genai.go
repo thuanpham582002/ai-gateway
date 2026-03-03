@@ -15,6 +15,7 @@ const (
 	genaiMetricServerRequestDuration    = "gen_ai.server.request.duration"
 	genaiMetricServerTimeToFirstToken   = "gen_ai.server.time_to_first_token"   //nolint:gosec // metric name, not credential
 	genaiMetricServerTimePerOutputToken = "gen_ai.server.time_per_output_token" //nolint:gosec // metric name, not credential
+	genaiMetricServerRequestErrorsTotal = "gen_ai.server.request.errors"
 
 	genaiAttributeOperationName = "gen_ai.operation.name"
 	genaiAttributeProviderName  = "gen_ai.provider.name"
@@ -55,6 +56,28 @@ const (
 	genaiErrorTypeFallback           = "_OTHER"
 )
 
+// GenAIErrorType represents the type of error that occurred during request processing.
+// These are low-cardinality error categories for metrics attribution.
+// See: https://opentelemetry.io/docs/specs/semconv/attributes-registry/error/#error-type
+type GenAIErrorType string
+
+const (
+	// GenAIErrorNone represents no error (successful request).
+	GenAIErrorNone GenAIErrorType = ""
+	// GenAIErrorInvalidRequest represents malformed or invalid request body/headers.
+	GenAIErrorInvalidRequest GenAIErrorType = "invalid_request"
+	// GenAIErrorBackendError represents non-2xx response from upstream backend.
+	GenAIErrorBackendError GenAIErrorType = "backend_error"
+	// GenAIErrorTransformError represents request/response transformation failures.
+	GenAIErrorTransformError GenAIErrorType = "transform_error"
+	// GenAIErrorAuthError represents authentication/authorization failures.
+	GenAIErrorAuthError GenAIErrorType = "auth_error"
+	// GenAIErrorConfigError represents configuration or backend setup errors.
+	GenAIErrorConfigError GenAIErrorType = "config_error"
+	// GenAIErrorInternal represents internal processing errors (CEL, metadata, etc).
+	GenAIErrorInternal GenAIErrorType = "internal_error"
+)
+
 // GenAIOperation represents the type of generative AI operation i.e. the endpoint being called.
 type GenAIOperation string
 
@@ -79,6 +102,9 @@ type genAI struct {
 	// Calculated by: (request_duration - time_to_first_token) / (output_tokens - 1)
 	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiservertime_per_output_token
 	outputTokenLatency metric.Float64Histogram
+	// requestErrors is a counter of failed requests by error type.
+	// This provides error categorization for alerting and debugging.
+	requestErrors metric.Int64Counter
 }
 
 // newGenAI creates a new genAI metrics instance.
@@ -107,6 +133,11 @@ func newGenAI(meter metric.Meter) *genAI {
 			metric.WithDescription("Time per output token generated after the first token for successful responses."),
 			metric.WithUnit("s"),
 			metric.WithExplicitBucketBoundaries(0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5),
+		),
+		requestErrors: mustRegisterInt64Counter(meter,
+			genaiMetricServerRequestErrorsTotal,
+			metric.WithDescription("Total count of failed requests by error type."),
+			metric.WithUnit("{request}"),
 		),
 	}
 }

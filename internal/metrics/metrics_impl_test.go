@@ -168,7 +168,7 @@ func testRecordRequestCompletion(t *testing.T) {
 			attribute.Key(genaiAttributeResponseModel).String("test-model"),
 		}
 		attrsSuccess = attribute.NewSet(attrs...)
-		attrsFailure = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeErrorType).String(genaiErrorTypeFallback))...)
+		attrsFailure = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeErrorType).String(string(GenAIErrorBackendError)))...)
 	)
 
 	pm.StartRequest(nil)
@@ -178,16 +178,20 @@ func testRecordRequestCompletion(t *testing.T) {
 	pm.SetBackend(&filterapi.Backend{Name: "custom"})
 
 	time.Sleep(10 * time.Millisecond)
-	pm.RecordRequestCompletion(t.Context(), true, nil)
+	pm.RecordRequestCompletion(t.Context(), true, GenAIErrorNone, nil)
 	count, sum := testotel.GetHistogramValues(t, mr, genaiMetricServerRequestDuration, attrsSuccess)
 	assert.Equal(t, uint64(1), count)
 	assert.Equal(t, 10*time.Millisecond.Seconds(), sum)
 
-	pm.RecordRequestCompletion(t.Context(), false, nil)
-	pm.RecordRequestCompletion(t.Context(), false, nil)
+	pm.RecordRequestCompletion(t.Context(), false, GenAIErrorBackendError, nil)
+	pm.RecordRequestCompletion(t.Context(), false, GenAIErrorBackendError, nil)
 	count, sum = testotel.GetHistogramValues(t, mr, genaiMetricServerRequestDuration, attrsFailure)
 	assert.Equal(t, uint64(2), count)
 	assert.Equal(t, 2*10*time.Millisecond.Seconds(), sum)
+
+	// Verify error counter was incremented
+	errorCount := testotel.GetInt64CounterValue(t, mr, genaiMetricServerRequestErrorsTotal, attrsFailure)
+	assert.Equal(t, int64(2), errorCount)
 }
 
 func TestGetTimeToFirstTokenMsAndGetInterTokenLatencyMs(t *testing.T) {
