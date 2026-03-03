@@ -304,7 +304,6 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 		}
 		var matches []gwapiv1.HTTPRouteMatch
 		var ruleFilters []gwapiv1.HTTPRouteFilter
-		ruleFilters = append(ruleFilters, rewriteFilters...)
 
 		for j := range rule.Matches {
 			// Use specified Path or fall back to rootPrefix
@@ -318,7 +317,10 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    pathMatch,
 			})
 
-			// Add URLRewrite filter if PathRewrite is specified
+			// Add URLRewrite filter FIRST if PathRewrite is specified.
+			// This ensures path rewriting happens before ExtProc processes the request,
+			// allowing ExtProc to see the rewritten path (e.g., /v1/completions)
+			// instead of the original custom-prefixed path.
 			if rule.Matches[j].PathRewrite != nil {
 				urlRewrite := &gwapiv1.HTTPURLRewriteFilter{}
 				if rule.Matches[j].PathRewrite.ReplacePrefixMatch != nil {
@@ -340,6 +342,10 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				}
 			}
 		}
+
+		// Add ExtensionRef (host rewrite) AFTER URLRewrite filters.
+		// This ordering ensures ExtProc sees the rewritten path.
+		ruleFilters = append(ruleFilters, rewriteFilters...)
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			BackendRefs: backendRefs,
 			Matches:     matches,

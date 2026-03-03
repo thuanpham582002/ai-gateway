@@ -96,7 +96,10 @@ func (s *Server) Register(path string, newProcessor ProcessorFactory) {
 var errNoProcessor = errors.New("no processor registered for the given path")
 
 // processorForPath returns the processor for the given path.
-// Only exact path matching is supported currently.
+// Supports both exact path matching and suffix matching.
+// Suffix matching allows custom path prefixes like:
+// /v1/projects/{project}/locations/{region}/endpoints/{id}/completions
+// to match the registered processor for /v1/completions.
 func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFilter bool, logger *slog.Logger) (Processor, error) {
 	pathHeader := ":path"
 	if isUpstreamFilter {
@@ -109,11 +112,20 @@ func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFi
 		path = path[:queryIndex]
 	}
 
-	newProcessor, ok := s.processorFactories[path]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", errNoProcessor, path)
+	// First try exact match for backward compatibility.
+	if newProcessor, ok := s.processorFactories[path]; ok {
+		return newProcessor(s.config, requestHeaders, logger, isUpstreamFilter, s.enableRedaction)
 	}
-	return newProcessor(s.config, requestHeaders, logger, isUpstreamFilter, s.enableRedaction)
+
+	// If no exact match, try suffix matching.
+	// This allows custom path prefixes to work with standard OpenAI-style endpoints.
+	for registeredPath, newProcessor := range s.processorFactories {
+		if strings.HasSuffix(path, registeredPath) {
+			return newProcessor(s.config, requestHeaders, logger, isUpstreamFilter, s.enableRedaction)
+		}
+	}
+
+	return nil, fmt.Errorf("%w: %s", errNoProcessor, path)
 }
 
 // originalPathHeader is the header used to pass the original path to the processor.

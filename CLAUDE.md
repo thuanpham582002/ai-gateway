@@ -135,6 +135,37 @@ spec:
 
 **Risk:** Low - invalid paths return 404 at runtime, no security issue.
 
+### HTTPRoute Filter Ordering Fix (PathRewrite + ExtProc)
+
+**Issue:** When using `pathRewrite` in AIGatewayRoute, ExtProc was seeing the original path instead of the rewritten path. This caused ExtProc to reject requests with custom path prefixes like `/v1/projects/{project}/locations/{region}/endpoints/{id}/completions`.
+
+**Root Cause:** HTTPRoute filters were ordered as:
+1. ExtensionRef (triggers ExtProc)
+2. URLRewrite (path rewrite)
+
+ExtProc ran BEFORE URLRewrite, so it saw the original path and rejected it as "unsupported path".
+
+**Fix:** Reordered filters in `internal/controller/ai_gateway_route.go`:
+1. URLRewrite (path rewrite) - runs first
+2. ExtensionRef (triggers ExtProc) - runs after, sees rewritten path
+
+Now ExtProc correctly sees `/v1/completions` instead of the custom-prefixed path.
+
+### ExtProc Suffix Matching (Path Processor Lookup)
+
+**Issue:** ExtProc used exact path matching to find processors, which failed for custom path prefixes like `/v1/projects/{project}/.../completions`.
+
+**Root Cause:** `processorForPath()` in `internal/extproc/server.go` only did exact map lookup:
+```go
+newProcessor, ok := s.processorFactories[path]  // exact match only
+```
+
+**Fix:** Added suffix matching fallback in `processorForPath()`:
+1. First try exact match (backward compatibility)
+2. If no exact match, try suffix matching against registered paths
+
+Now `/v1/projects/myproject/locations/default/endpoints/abc123/completions` matches the processor registered for `/v1/completions`.
+
 ---
 
 ## Upstream Sync
