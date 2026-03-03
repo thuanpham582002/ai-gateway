@@ -16,7 +16,6 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,7 +92,7 @@ func (s *Server) maybeCreateWeightedInferencePoolClusters(
 				}
 
 				// Modify the route to use weighted_clusters
-				if err := s.modifyRouteToWeightedClusters(route, result.Pools); err != nil {
+				if err := s.modifyRouteToWeightedClusters(route, result.Pools, result.SessionAffinity); err != nil {
 					s.log.Error(err, "failed to modify route to weighted clusters", "route", route.Name)
 					continue
 				}
@@ -106,9 +105,10 @@ func (s *Server) maybeCreateWeightedInferencePoolClusters(
 
 // weightedPoolsResult contains the result of getWeightedPoolsForRoute.
 type weightedPoolsResult struct {
-	Pools     []WeightedPool
-	Route     *aigv1a1.AIGatewayRoute
-	RuleIndex int
+	Pools           []WeightedPool
+	Route           *aigv1a1.AIGatewayRoute
+	RuleIndex       int
+	SessionAffinity *aigv1a1.SessionAffinityConfig
 }
 
 // getWeightedPoolsForRoute extracts InferencePool references and their weights from a route.
@@ -165,9 +165,10 @@ func (s *Server) getWeightedPoolsForRoute(route *routev3.Route) (*weightedPoolsR
 	}
 
 	return &weightedPoolsResult{
-		Pools:     weightedPools,
-		Route:     aigwRoute,
-		RuleIndex: httpRouteRuleIndex,
+		Pools:           weightedPools,
+		Route:           aigwRoute,
+		RuleIndex:       httpRouteRuleIndex,
+		SessionAffinity: rule.SessionAffinity,
 	}, nil
 }
 
@@ -237,7 +238,9 @@ func (s *Server) createOriginalDstClusterForPool(pool *gwaiev1.InferencePool, cl
 }
 
 // modifyRouteToWeightedClusters modifies the route action to use weighted_clusters.
-func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPools []WeightedPool) error {
+// If session affinity is configured, it adds hash_policy to the route and enables
+// use_hash_policy on weighted_clusters for consistent cluster selection.
+func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPools []WeightedPool, sessionAffinity *aigv1a1.SessionAffinityConfig) error {
 	routeAction := route.GetRoute()
 	if routeAction == nil {
 		return fmt.Errorf("route %s has no route action", route.Name)
@@ -271,54 +274,57 @@ func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPoo
 		clusterWeights = append(clusterWeights, clusterWeight)
 	}
 
+	// Build weighted clusters config
+	weightedClusters := &routev3.WeightedCluster{
+		Clusters:    clusterWeights,
+		TotalWeight: wrapperspb.UInt32(totalWeight),
+	}
+
+	// Add session affinity using Envoy's native hash_policy + use_hash_policy
+	// When use_hash_policy is true, Envoy uses the route's hash_policy to
+	// deterministically select which cluster gets the request instead of random selection.
+	if sessionAffinity != nil && len(sessionAffinity.HashOn) > 0 {
+		// Add hash_policy to the route action
+		for _, source := range sessionAffinity.HashOn {
+			switch source.Type {
+			case aigv1a1.HashSourceHeader:
+				routeAction.HashPolicy = append(routeAction.HashPolicy, &routev3.RouteAction_HashPolicy{
+					PolicySpecifier: &routev3.RouteAction_HashPolicy_Header_{
+						Header: &routev3.RouteAction_HashPolicy_Header{
+							HeaderName: source.Name,
+						},
+					},
+				})
+				s.log.Info("added hash policy for session affinity", "type", "header", "name", source.Name)
+			case aigv1a1.HashSourceQueryParam:
+				routeAction.HashPolicy = append(routeAction.HashPolicy, &routev3.RouteAction_HashPolicy{
+					PolicySpecifier: &routev3.RouteAction_HashPolicy_QueryParameter_{
+						QueryParameter: &routev3.RouteAction_HashPolicy_QueryParameter{
+							Name: source.Name,
+						},
+					},
+				})
+				s.log.Info("added hash policy for session affinity", "type", "query_param", "name", source.Name)
+			// Note: RequestBody requires custom handling via ext_proc as Envoy doesn't natively support it
+			}
+		}
+
+		// Enable use_hash_policy for weighted clusters
+		// This makes Envoy use the hash to select which cluster, not just within a cluster
+		if len(routeAction.HashPolicy) > 0 {
+			weightedClusters.RandomValueSpecifier = &routev3.WeightedCluster_UseHashPolicy{
+				UseHashPolicy: wrapperspb.Bool(true),
+			}
+			s.log.Info("enabled use_hash_policy for session affinity on weighted clusters")
+		}
+	}
+
 	// Set weighted_clusters as the route action
 	routeAction.ClusterSpecifier = &routev3.RouteAction_WeightedClusters{
-		WeightedClusters: &routev3.WeightedCluster{
-			Clusters:    clusterWeights,
-			TotalWeight: wrapperspb.UInt32(totalWeight),
-		},
+		WeightedClusters: weightedClusters,
 	}
-
-	// Add session affinity metadata to route
-	s.addSessionAffinityMetadata(route, weightedPools)
 
 	return nil
-}
-
-// addSessionAffinityMetadata adds session affinity configuration to the route metadata.
-// This allows ExtProc to read the configuration and apply session affinity logic.
-func (s *Server) addSessionAffinityMetadata(route *routev3.Route, weightedPools []WeightedPool) {
-	if route.Metadata == nil {
-		route.Metadata = &corev3.Metadata{}
-	}
-	if route.Metadata.FilterMetadata == nil {
-		route.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
-	}
-
-	// Get or create the AI Gateway metadata namespace
-	m, ok := route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace]
-	if !ok {
-		m = &structpb.Struct{}
-		route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace] = m
-	}
-	if m.Fields == nil {
-		m.Fields = make(map[string]*structpb.Value)
-	}
-
-	// Store pool information as metadata
-	var poolList []*structpb.Value
-	for _, wp := range weightedPools {
-		poolInfo := &structpb.Struct{
-			Fields: map[string]*structpb.Value{
-				"name":      structpb.NewStringValue(wp.Pool.Name),
-				"namespace": structpb.NewStringValue(wp.Pool.Namespace),
-				"weight":    structpb.NewNumberValue(float64(wp.Weight)),
-			},
-		}
-		poolList = append(poolList, structpb.NewStructValue(poolInfo))
-	}
-
-	m.Fields["weighted_inference_pools"] = structpb.NewListValue(&structpb.ListValue{Values: poolList})
 }
 
 // weightedClusterNameForPool returns the cluster name for a weighted InferencePool.
