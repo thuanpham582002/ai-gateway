@@ -128,18 +128,26 @@ func (b *metricsImpl) buildBaseAttributes(headers map[string]string) attribute.S
 }
 
 // RecordRequestCompletion records the completion of a request with success/failure status.
-func (b *metricsImpl) RecordRequestCompletion(ctx context.Context, success bool, requestHeaders map[string]string) {
+func (b *metricsImpl) RecordRequestCompletion(ctx context.Context, success bool, errorType GenAIErrorType, requestHeaders map[string]string) {
 	attrs := b.buildBaseAttributes(requestHeaders)
 
 	if success {
 		// According to the semantic conventions, the error attribute should not be added for successful operations.
 		b.metrics.requestLatency.Record(ctx, time.Since(b.requestStart).Seconds(), metric.WithAttributeSet(attrs))
 	} else {
-		// We don't have a set of typed errors yet, or a set of low-cardinality values, so we can just set the value to the
-		// placeholder one. See: https://opentelemetry.io/docs/specs/semconv/attributes-registry/error/#error-type
+		// Use the provided error type for categorization, fallback to _OTHER if not specified.
+		errTypeStr := string(errorType)
+		if errTypeStr == "" {
+			errTypeStr = genaiErrorTypeFallback
+		}
 		b.metrics.requestLatency.Record(ctx, time.Since(b.requestStart).Seconds(),
 			metric.WithAttributeSet(attrs),
-			metric.WithAttributes(attribute.Key(genaiAttributeErrorType).String(genaiErrorTypeFallback)),
+			metric.WithAttributes(attribute.Key(genaiAttributeErrorType).String(errTypeStr)),
+		)
+		// Also increment the error counter for alerting and dashboards.
+		b.metrics.requestErrors.Add(ctx, 1,
+			metric.WithAttributeSet(attrs),
+			metric.WithAttributes(attribute.Key(genaiAttributeErrorType).String(errTypeStr)),
 		)
 	}
 }

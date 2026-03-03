@@ -299,7 +299,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) onRetry() bo
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequestHeaders(ctx context.Context, _ *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
 	defer func() {
 		if err != nil {
-			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
 		}
 	}()
 
@@ -322,7 +322,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 			// return to user as 422 -  e.g., "invalid request body: tool_choice type not supported"
 			u.logger.Info("returning user-facing error for invalid request", slog.String("error", err.Error()))
 			// Record this as a failed request in metrics
-			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorInvalidRequest, u.requestHeaders)
 			return createUserFacingErrorResponse(422, "UnprocessableEntity", userFacingErr.Error()), nil
 		}
 		return nil, fmt.Errorf("failed to transform request: %w", err)
@@ -398,7 +398,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessResponseHeaders(ctx context.Context, headers *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
 	defer func() {
 		if err != nil {
-			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
 		}
 	}()
 
@@ -425,14 +425,20 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 
 // ProcessResponseBody implements [Processor.ProcessResponseBody].
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
-	recordRequestCompletionErr := false
+	var errorType metrics.GenAIErrorType
 	defer func() {
-		if err != nil || recordRequestCompletionErr {
-			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+		if err != nil {
+			// Transform errors from response processing
+			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
+			return
+		}
+		if errorType != metrics.GenAIErrorNone {
+			// Backend error (non-2xx response)
+			u.metrics.RecordRequestCompletion(ctx, false, errorType, u.requestHeaders)
 			return
 		}
 		if body.EndOfStream {
-			u.metrics.RecordRequestCompletion(ctx, true, u.requestHeaders)
+			u.metrics.RecordRequestCompletion(ctx, true, metrics.GenAIErrorNone, u.requestHeaders)
 		}
 	}()
 
@@ -458,8 +464,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			}
 			u.parent.span.EndSpanOnError(code, b)
 		}
-		// Mark so the deferred handler records failure.
-		recordRequestCompletionErr = true
+		// Mark as backend error so the deferred handler records failure with proper error type.
+		errorType = metrics.GenAIErrorBackendError
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
@@ -534,7 +540,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(ctx context.Context, b *filterapi.Backend, backendHandler filterapi.BackendAuthHandler, routeProcessor Processor) (err error) {
 	defer func() {
 		if err != nil {
-			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorConfigError, u.requestHeaders)
 		}
 	}()
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])

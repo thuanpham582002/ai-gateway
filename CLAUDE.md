@@ -76,6 +76,39 @@ rules:
     modelNameOverride: meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
+### Error Categorization Metrics
+
+Added error type categorization to ExtProc metrics for better observability and alerting.
+
+**New Metric:**
+- `gen_ai.server.request.errors` - Counter of failed requests by error type
+
+**Error Types** (`internal/metrics/genai.go`):
+
+| Type | Description |
+|------|-------------|
+| `invalid_request` | Malformed/invalid request body (422 errors) |
+| `backend_error` | Non-2xx response from upstream backend |
+| `transform_error` | Request/response transformation failures |
+| `auth_error` | Authentication/authorization failures |
+| `config_error` | Backend setup/configuration errors |
+| `internal_error` | CEL evaluation, metadata building errors |
+
+**Modified Files:**
+- `internal/metrics/genai.go` - Added `GenAIErrorType` enum and error counter
+- `internal/metrics/metrics.go` - Updated `RecordRequestCompletion` interface
+- `internal/metrics/metrics_impl.go` - Implemented error categorization
+- `internal/extproc/processor_impl.go` - Added error types to all failure paths
+
+**PromQL Examples:**
+```promql
+# Error rate by type
+rate(gen_ai_server_request_errors_total{error_type="backend_error"}[5m])
+
+# Total error ratio
+sum(gen_ai_server_request_errors_total) / sum(gen_ai_server_request_duration_count)
+```
+
 ### Path-Based Routing Support
 
 Added `Path` field to `AIGatewayRouteRuleMatch` for Vertex AI-style URL patterns:
