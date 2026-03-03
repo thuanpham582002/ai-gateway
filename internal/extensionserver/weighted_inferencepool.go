@@ -205,7 +205,13 @@ func (s *Server) getAIGatewayRouteFromRouteName(routeName string) (*aigv1a1.AIGa
 }
 
 // createOriginalDstClusterForPool creates an ORIGINAL_DST cluster for a single InferencePool.
+// Each weighted cluster uses a UNIQUE header for endpoint selection. This allows
+// multiple EPP filters to run at listener level, each setting their own header,
+// and the correct endpoint is used based on which cluster was selected.
 func (s *Server) createOriginalDstClusterForPool(pool *gwaiev1.InferencePool, clusterName string) *clusterv3.Cluster {
+	// Use a pool-specific header for endpoint selection
+	headerName := endpointPickerHeaderForPool(pool)
+
 	cluster := &clusterv3.Cluster{
 		Name:                 clusterName,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_ORIGINAL_DST},
@@ -214,7 +220,7 @@ func (s *Server) createOriginalDstClusterForPool(pool *gwaiev1.InferencePool, cl
 		LbConfig: &clusterv3.Cluster_OriginalDstLbConfig_{
 			OriginalDstLbConfig: &clusterv3.Cluster_OriginalDstLbConfig{
 				UseHttpHeader:  true,
-				HttpHeaderName: internalapi.EndpointPickerHeaderKey,
+				HttpHeaderName: headerName,
 			},
 		},
 		LoadBalancingPolicy: nil,
@@ -223,6 +229,9 @@ func (s *Server) createOriginalDstClusterForPool(pool *gwaiev1.InferencePool, cl
 
 	// Add InferencePool metadata to the cluster
 	buildEPPMetadataForCluster(cluster, pool)
+
+	s.log.Info("created ORIGINAL_DST cluster with pool-specific header",
+		"cluster", clusterName, "pool", pool.Name, "header", headerName)
 
 	return cluster
 }
