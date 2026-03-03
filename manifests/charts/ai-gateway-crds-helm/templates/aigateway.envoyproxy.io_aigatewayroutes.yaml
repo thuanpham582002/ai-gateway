@@ -804,11 +804,52 @@ spec:
                                 maxLength: 1024
                                 type: string
                             type: object
-                            # NOTE: CEL validations removed to avoid exceeding Kubernetes CRD validation budget.
-                            # The Path field inherits 11 CEL validations from Gateway API's HTTPPathMatch type.
-                            # Combined with other AIGatewayRoute validations, total cost exceeds K8s budget (~138%).
-                            # Envoy still validates paths at runtime - invalid paths return 404.
-                            # See CLAUDE.md "Known Issues" section for details.
+                            x-kubernetes-validations:
+                            - message: value must be an absolute path and start with
+                                '/' when type one of ['Exact', 'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? self.value.startsWith(''/'')
+                                : true'
+                            - message: must not contain '//' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''//'')
+                                : true'
+                            - message: must not contain '/./' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''/./'')
+                                : true'
+                            - message: must not contain '/../' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''/../'')
+                                : true'
+                            - message: must not contain '%2f' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''%2f'')
+                                : true'
+                            - message: must not contain '%2F' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''%2F'')
+                                : true'
+                            - message: must not contain '#' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''#'')
+                                : true'
+                            - message: must not end with '/..' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.endsWith(''/..'')
+                                : true'
+                            - message: must not end with '/.' when type one of ['Exact',
+                                'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.endsWith(''/.'')
+                                : true'
+                            - message: type must be one of ['Exact', 'PathPrefix',
+                                'RegularExpression']
+                              rule: self.type in ['Exact','PathPrefix'] || self.type
+                                == 'RegularExpression'
+                            - message: must only contain valid characters (matching
+                                ^(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|[%][0-9a-fA-F]{2})+$)
+                                for types ['Exact', 'PathPrefix']
+                              rule: '(self.type in [''Exact'',''PathPrefix'']) ? self.value.matches(r"""^(?:[-A-Za-z0-9/._~!$&''()*+,;=:@]|[%][0-9a-fA-F]{2})+$""")
+                                : true'
                           pathRewrite:
                             description: |-
                               PathRewrite specifies how to rewrite the path before forwarding to the backend.
@@ -879,57 +920,33 @@ spec:
                         in the same rule. For single InferencePool or AIServiceBackend references,
                         this field is ignored.
                       properties:
-                        fallback:
-                          allOf:
-                          - enum:
-                            - WeightedRandom
-                            - FirstBackend
-                            - RejectRequest
-                          - enum:
-                            - WeightedRandom
-                            - FirstBackend
-                            - RejectRequest
-                          default: WeightedRandom
-                          description: |-
-                            Fallback specifies behavior when no hash key is found from any source.
-                            - WeightedRandom: Use random weighted selection (no affinity)
-                            - FirstBackend: Always route to first backend (100% to primary)
-                            - RejectRequest: Return error if session affinity is required
-                          type: string
                         hashOn:
                           description: |-
                             HashOn specifies sources to extract hash key from, in priority order.
                             First non-empty value found will be used for consistent hashing.
                             Same hash key always routes to the same pool (deterministic).
+                            When no hash key is found, Envoy falls back to random weighted selection.
                           items:
                             description: HashSource defines a source to extract hash
                               key from for session affinity.
                             properties:
-                              jsonPath:
-                                description: |-
-                                  JSONPath to extract from request body.
-                                  Required when Type is RequestBody.
-                                  Uses JSONPath syntax: "$.user", "$.metadata.session_id", etc.
-                                type: string
                               name:
-                                description: |-
-                                  Name of the header or query parameter.
-                                  Required when Type is Header or QueryParam.
+                                description: Name of the header or query parameter.
+                                minLength: 1
                                 type: string
                               type:
                                 allOf:
                                 - enum:
                                   - Header
-                                  - RequestBody
                                   - QueryParam
                                 - enum:
                                   - Header
-                                  - RequestBody
                                   - QueryParam
                                 description: Type specifies the source type to extract
                                   the hash key from.
                                 type: string
                             required:
+                            - name
                             - type
                             type: object
                           maxItems: 5
