@@ -110,7 +110,9 @@ type Metrics interface {
 	// after parsing the request body to determine the model and invoke the routing logic.
 	SetBackend(backend *filterapi.Backend)
 	// RecordRequestCompletion records the completion of the request, including success status.
-	RecordRequestCompletion(ctx context.Context, success bool, requestHeaders map[string]string)
+	// For failed requests, errorType should be set to categorize the error (e.g., GenAIErrorInvalidRequest).
+	// For successful requests, errorType should be GenAIErrorNone.
+	RecordRequestCompletion(ctx context.Context, success bool, errorType GenAIErrorType, requestHeaders map[string]string)
 	// RecordTokenUsage records token usage metrics.
 	//
 	// Depending on the endpoint, some token types are not available and should be passed as OptUint32None.
