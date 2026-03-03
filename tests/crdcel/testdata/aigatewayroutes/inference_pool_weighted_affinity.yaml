@@ -3,13 +3,13 @@
 # The full text of the Apache license is available in the LICENSE file at
 # the root of the repo.
 
-# This is now valid: multiple InferencePool backends are supported for weighted routing
-# This enables canary/A-B testing with traffic splitting between pools
+# This is valid: multiple InferencePool backends with weights and session affinity
+# for canary/A-B testing with consistent routing for the same session
 
-apiVersion: aigateway.envoyproxy.io/v1beta1
+apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 metadata:
-  name: inference-pool-multiple
+  name: inference-pool-weighted-affinity
   namespace: default
 spec:
   parentRefs:
@@ -23,9 +23,18 @@ spec:
               name: x-ai-eg-model
               value: llama3-8b
       backendRefs:
-        - name: vllm-llama3-8b-instruct-1
+        - name: vllm-llama3-8b-v1
           group: inference.networking.k8s.io
           kind: InferencePool
-        - name: vllm-llama3-8b-instruct-2
+          weight: 80
+        - name: vllm-llama3-8b-v2
           group: inference.networking.k8s.io
           kind: InferencePool
+          weight: 20
+      sessionAffinity:
+        hashOn:
+          - type: Header
+            name: X-Session-ID
+          - type: RequestBody
+            jsonPath: "$.user"
+        fallback: WeightedRandom

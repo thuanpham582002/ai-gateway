@@ -41,10 +41,10 @@ func TestAIGatewayRoutes(t *testing.T) {
 			name:   "inference_pool_mixed_backends.yaml",
 			expErr: "spec.rules[0]: Invalid value: \"object\": cannot mix InferencePool and AIServiceBackend references in the same rule",
 		},
-		{
-			name:   "inference_pool_multiple.yaml",
-			expErr: "spec.rules[0]: Invalid value: \"object\": only one InferencePool backend is allowed per rule",
-		},
+		// Multiple InferencePools are now supported for weighted routing/canary testing
+		{name: "inference_pool_multiple.yaml"},
+		// Multiple InferencePools with weights and session affinity
+		{name: "inference_pool_weighted_affinity.yaml"},
 		{
 			name:   "inference_pool_partial_ref.yaml",
 			expErr: "spec.rules[0].backendRefs[0]: Invalid value: \"object\": group and kind must be specified together",
