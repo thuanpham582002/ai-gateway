@@ -965,13 +965,15 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 
 		s.patchListenerWithInferencePoolFilters(listener, pools)
 
-		// Verify the new filter was added.
+		// Verify the new filters were added.
+		// Each pool adds: ext_proc filter + header_mutation filter
 		hcm := &httpconnectionmanagerv3.HttpConnectionManager{}
 		err := listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm)
 		require.NoError(t, err)
-		require.Len(t, hcm.HttpFilters, 2) // Should have inference pool filter + router.
+		require.Len(t, hcm.HttpFilters, 3) // ext_proc + header_mutation + router
 		require.Equal(t, httpFilterNameForInferencePool(pools[0]), hcm.HttpFilters[0].Name)
-		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[1].Name)
+		require.Contains(t, hcm.HttpFilters[1].Name, "header_mutation/epp_copy")
+		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[2].Name)
 	})
 
 	t.Run("listener with multiple inference pools", func(t *testing.T) {
@@ -987,14 +989,17 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 
 		s.patchListenerWithInferencePoolFilters(listener, pools)
 
-		// Verify both filters were added.
+		// Verify all filters were added.
+		// Each pool adds: ext_proc filter + header_mutation filter
 		hcm := &httpconnectionmanagerv3.HttpConnectionManager{}
 		err := listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm)
 		require.NoError(t, err)
-		require.Len(t, hcm.HttpFilters, 3) // Should have 2 inference pool filters + router.
+		require.Len(t, hcm.HttpFilters, 5) // 2x ext_proc + 2x header_mutation + router
 		require.Equal(t, httpFilterNameForInferencePool(pools[0]), hcm.HttpFilters[0].Name)
-		require.Equal(t, httpFilterNameForInferencePool(pools[1]), hcm.HttpFilters[1].Name)
-		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[2].Name)
+		require.Contains(t, hcm.HttpFilters[1].Name, "header_mutation/epp_copy")
+		require.Equal(t, httpFilterNameForInferencePool(pools[1]), hcm.HttpFilters[2].Name)
+		require.Contains(t, hcm.HttpFilters[3].Name, "header_mutation/epp_copy")
+		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[4].Name)
 	})
 
 	t.Run("listener with both filter chains and default filter chain", func(t *testing.T) {
@@ -1031,17 +1036,18 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 		s.patchListenerWithInferencePoolFilters(listener, pools)
 
 		// Verify both filter chains were processed.
+		// Each pool adds: ext_proc filter + header_mutation filter
 		// Check the first filter chain.
 		hcm1 := &httpconnectionmanagerv3.HttpConnectionManager{}
 		err := listener.FilterChains[0].Filters[0].GetTypedConfig().UnmarshalTo(hcm1)
 		require.NoError(t, err)
-		require.Len(t, hcm1.HttpFilters, 2)
+		require.Len(t, hcm1.HttpFilters, 3) // ext_proc + header_mutation + router
 
 		// Check the default filter chain.
 		hcm2 := &httpconnectionmanagerv3.HttpConnectionManager{}
 		err = listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm2)
 		require.NoError(t, err)
-		require.Len(t, hcm2.HttpFilters, 2)
+		require.Len(t, hcm2.HttpFilters, 3) // ext_proc + header_mutation + router
 	})
 
 	t.Run("error marshaling updated HCM", func(_ *testing.T) {
