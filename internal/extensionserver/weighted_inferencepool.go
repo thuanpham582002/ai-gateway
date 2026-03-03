@@ -31,8 +31,9 @@ const weightedInferencePoolClusterPrefix = "ai-gateway-weighted-inferencepool-"
 
 // WeightedPool represents an InferencePool with its routing weight.
 type WeightedPool struct {
-	Pool   *gwaiev1.InferencePool
-	Weight uint32
+	Pool            *gwaiev1.InferencePool
+	Weight          uint32
+	BackendRefIndex int // Original index in backendRefs for correct metadata naming
 }
 
 // maybeCreateWeightedInferencePoolClusters scans routes for multiple InferencePool backends
@@ -72,7 +73,7 @@ func (s *Server) maybeCreateWeightedInferencePoolClusters(
 					"route", route.Name, "pool_count", len(result.Pools))
 
 				// Create ORIGINAL_DST cluster for each pool
-				for i, wp := range result.Pools {
+				for _, wp := range result.Pools {
 					clusterName := weightedClusterNameForPool(wp.Pool)
 					if clusterExists[clusterName] {
 						continue
@@ -82,8 +83,10 @@ func (s *Server) maybeCreateWeightedInferencePoolClusters(
 
 					// Set backend name metadata for the upstream ext_proc filter.
 					// This is required for the AI Gateway ext_proc to identify the backend.
+					// Use wp.BackendRefIndex (original position in backendRefs) so the name matches
+					// what the controller generates in PerRouteRuleRefBackendName().
 					setClusterMetadataBackendName(cluster, result.Route.Namespace, wp.Pool.Name,
-						result.Route.Name, result.RuleIndex, i)
+						result.Route.Name, result.RuleIndex, wp.BackendRefIndex)
 
 					newClusters = append(newClusters, cluster)
 					clusterExists[clusterName] = true
@@ -129,7 +132,7 @@ func (s *Server) getWeightedPoolsForRoute(route *routev3.Route) (*weightedPoolsR
 
 	// Check if this rule has InferencePool backends
 	var weightedPools []WeightedPool
-	for _, backendRef := range rule.BackendRefs {
+	for i, backendRef := range rule.BackendRefs {
 		// Check if this is an InferencePool reference
 		if backendRef.Group == nil || *backendRef.Group != "inference.networking.k8s.io" {
 			continue
@@ -160,8 +163,9 @@ func (s *Server) getWeightedPoolsForRoute(route *routev3.Route) (*weightedPoolsR
 		}
 
 		weightedPools = append(weightedPools, WeightedPool{
-			Pool:   &pool,
-			Weight: weight,
+			Pool:            &pool,
+			Weight:          weight,
+			BackendRefIndex: i, // Capture original index for correct metadata naming
 		})
 	}
 
@@ -306,7 +310,7 @@ func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPoo
 					},
 				})
 				s.log.Info("added hash policy for session affinity", "type", "query_param", "name", source.Name)
-			// Note: RequestBody requires custom handling via ext_proc as Envoy doesn't natively support it
+				// Note: RequestBody requires custom handling via ext_proc as Envoy doesn't natively support it
 			}
 		}
 

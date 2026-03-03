@@ -1502,7 +1502,7 @@ spec:
                           modelNameOverride:
                             description: |-
                               Name of the model in the backend. If provided this will override the name provided in the request.
-                              This field is ignored when referencing InferencePool resources.
+                              For InferencePool backends, this overrides the model name sent to the inference endpoint.
                             type: string
                           name:
                             description: |-
@@ -1883,15 +1883,7 @@ spec:
                     rule: '!has(self.backendRefs) || size(self.backendRefs) == 0 ||
                       (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind))
                       || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))'
-<<<<<<< HEAD
-                  - message: only one InferencePool backend is allowed per rule
-                    rule: '!has(self.backendRefs) || size(self.backendRefs) == 0 ||
-                      !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind))
-                      || size(self.backendRefs) == 1'
-                maxItems: 15
-=======
                 maxItems: 128
->>>>>>> d5a49a0e (feat: add support for multiple InferencePool backends with weighted routing)
                 type: array
             required:
             - rules
