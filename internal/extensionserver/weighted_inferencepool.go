@@ -16,6 +16,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -324,7 +325,45 @@ func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPoo
 		WeightedClusters: weightedClusters,
 	}
 
+	// Add weighted pools metadata to route - this is required for getInferencePoolsFromRoute()
+	// to discover which pools need EPP filters added to the listener
+	s.addWeightedPoolsMetadata(route, weightedPools)
+
 	return nil
+}
+
+// addWeightedPoolsMetadata adds weighted pool information to route metadata.
+// This metadata is used by getInferencePoolsFromRoute() to discover which
+// InferencePools need EPP filters added to the listener.
+func (s *Server) addWeightedPoolsMetadata(route *routev3.Route, weightedPools []WeightedPool) {
+	if route.Metadata == nil {
+		route.Metadata = &corev3.Metadata{}
+	}
+	if route.Metadata.FilterMetadata == nil {
+		route.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
+	}
+
+	m, ok := route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace]
+	if !ok {
+		m = &structpb.Struct{}
+		route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace] = m
+	}
+	if m.Fields == nil {
+		m.Fields = make(map[string]*structpb.Value)
+	}
+
+	var poolList []*structpb.Value
+	for _, wp := range weightedPools {
+		poolInfo := &structpb.Struct{
+			Fields: map[string]*structpb.Value{
+				"name":      structpb.NewStringValue(wp.Pool.Name),
+				"namespace": structpb.NewStringValue(wp.Pool.Namespace),
+			},
+		}
+		poolList = append(poolList, structpb.NewStructValue(poolInfo))
+	}
+
+	m.Fields["weighted_inference_pools"] = structpb.NewListValue(&structpb.ListValue{Values: poolList})
 }
 
 // weightedClusterNameForPool returns the cluster name for a weighted InferencePool.
