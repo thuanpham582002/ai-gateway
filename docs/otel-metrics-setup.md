@@ -688,6 +688,151 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<epp-service>:9090/metrics | he
 
 ---
 
+## Quick Commands Reference
+
+### 1. AI Gateway ExtProc Metrics (Native Prometheus)
+
+```bash
+# Port-forward to extproc admin port
+kubectl port-forward -n envoy-gateway-system \
+  -l gateway.envoyproxy.io/owning-gateway-name=ai-gateway 1064:1064 &
+
+# Get metrics
+curl -s http://localhost:1064/metrics | grep gen_ai
+
+# Cleanup
+pkill -f "port-forward.*1064"
+```
+
+### 2. vLLM Metrics (Direct Scrape)
+
+```bash
+# Get vLLM pod IP
+VLLM_POD_IP=$(kubectl get pod -n testproject -l kserve.io/component=workload \
+  -o jsonpath='{.items[0].status.podIP}')
+
+# Curl from inside cluster
+kubectl run curl-vllm --rm -i --restart=Never --image=curlimages/curl -n testproject \
+  -- curl -s http://${VLLM_POD_IP}:8000/metrics
+
+# Key metrics to look for
+# vllm:num_requests_waiting      - Queue depth
+# vllm:num_requests_running      - Batch size
+# vllm:kv_cache_usage_perc       - KV cache %
+# vllm:time_to_first_token_seconds - TTFT
+# vllm:inter_token_latency_seconds - ITL
+```
+
+### 3. EPP Metrics (Requires RBAC)
+
+```bash
+# First, create RBAC (one-time)
+kubectl apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: epp-metrics-reader
+rules:
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: epp-metrics-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: epp-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: testproject
+EOF
+
+# Get EPP metrics with token auth
+kubectl run curl-epp --rm -i --restart=Never --image=curlimages/curl -n testproject \
+  -- sh -c '
+TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+curl -s -H "Authorization: Bearer $TOKEN" http://<EPP_SERVICE>:9090/metrics
+'
+
+# Key metrics to look for
+# inference_pool_ready_pods                    - Ready pods
+# inference_pool_average_kv_cache_utilization  - Pool KV cache avg
+# inference_pool_average_queue_size            - Pool queue avg
+# inference_objective_request_total            - Total requests
+# inference_objective_input_tokens_sum         - Total input tokens
+# inference_objective_output_tokens_sum        - Total output tokens
+```
+
+### 4. Envoy Stats
+
+```bash
+# Port-forward to Envoy admin
+kubectl port-forward -n envoy-gateway-system \
+  deploy/envoy-model-serving-ai-gateway-* 19000:19000 &
+
+# Request counts per cluster
+curl -s http://localhost:19000/stats | grep "upstream_rq_total"
+
+# ExtProc stats
+curl -s http://localhost:19000/stats | grep "ext_proc"
+
+# Cluster health
+curl -s http://localhost:19000/clusters | grep -E "health|cx_active"
+
+# Cleanup
+pkill -f "port-forward.*19000"
+```
+
+### 5. OTEL Collector Metrics
+
+```bash
+# Port-forward to OTEL Collector Prometheus endpoint
+kubectl port-forward -n observability svc/otel-collector 8889:8889 &
+
+# Get span metrics (converted from traces)
+curl -s http://localhost:8889/metrics | grep ai_gateway
+
+# Cleanup
+pkill -f "port-forward.*8889"
+```
+
+### 6. Jaeger Traces
+
+```bash
+# Port-forward to Jaeger UI
+kubectl port-forward -n observability svc/jaeger 16686:16686 &
+
+# Open browser
+open http://localhost:16686
+
+# Or query via API
+curl -s "http://localhost:16686/api/traces?service=ai-gateway&limit=10" | jq .
+```
+
+### 7. Full Metrics Pipeline Check
+
+```bash
+# 1. Check ExtProc is exporting to OTEL
+kubectl logs -n envoy-gateway-system \
+  -l gateway.envoyproxy.io/owning-gateway-name=ai-gateway \
+  -c ai-gateway-extproc --tail=20 | grep -i otel
+
+# 2. Check OTEL Collector is receiving
+kubectl logs -n observability deploy/otel-collector --tail=20
+
+# 3. Check Prometheus targets
+kubectl port-forward -n monitoring svc/prometheus-server 9090:80 &
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+
+# 4. Query token usage
+curl -s "http://localhost:9090/api/v1/query?query=gen_ai_client_token_usage_sum" | jq .
+```
+
+---
+
 ## Troubleshooting
 
 ### No traces appearing
