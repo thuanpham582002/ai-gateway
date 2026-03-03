@@ -22,9 +22,17 @@ Added support for multiple InferencePool backends per rule with weighted routing
 - `api/v1alpha1/ai_gateway_route.go` - Added SessionAffinity types, removed single-pool CEL validation
 - `internal/extproc/session_affinity.go` - **NEW** - Consistent hashing logic
 - `internal/extensionserver/weighted_inferencepool.go` - **NEW** - Weighted cluster generation
-- `internal/extensionserver/post_cluster_modify.go` - Handle multiple pools
+- `internal/extensionserver/post_cluster_modify.go` - Skip multiple pools (handled in PostTranslateModify)
 - `internal/extensionserver/post_route_modify.go` - Handle multiple pools
-- `internal/extensionserver/post_translate_modify.go` - Integrate weighted clusters
+- `internal/extensionserver/post_translate_modify.go` - Extract `addUpstreamExtProcFilter()`, integrate weighted clusters
+- `internal/extensionserver/inferencepool.go` - Fix metadata initialization bug
+
+**Implementation Details:**
+- Weighted clusters are created in `PostTranslateModify` (not `PostClusterModify`) because Envoy Gateway generates 1 cluster per rule, not per backend
+- Each weighted cluster uses `ORIGINAL_DST` type with header-based load balancing
+- Upstream ext_proc filter is added to each weighted cluster for AI Gateway processing
+- Route is modified to use `weighted_clusters` with proper weights
+- Backend name metadata must be set on clusters for ext_proc to identify backends
 
 ### Path-Based Routing Support
 
