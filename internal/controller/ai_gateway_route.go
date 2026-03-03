@@ -304,9 +304,15 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 		}
 		var matches []gwapiv1.HTTPRouteMatch
 		for j := range rule.Matches {
+			// Use specified Path or fall back to rootPrefix
+			pathMatch := &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix}
+			if rule.Matches[j].Path != nil {
+				pathMatch = rule.Matches[j].Path
+			}
+
 			matches = append(matches, gwapiv1.HTTPRouteMatch{
 				Headers: rule.Matches[j].Headers,
-				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
+				Path:    pathMatch,
 			})
 		}
 		rules = append(rules, gwapiv1.HTTPRouteRule{
