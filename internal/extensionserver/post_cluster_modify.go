@@ -45,11 +45,15 @@ func (s *Server) PostClusterModify(_ context.Context, req *egextension.PostClust
 	// BackendExtensionResources contains unstructured Kubernetes resources that were
 	// referenced in the AIGatewayRoute's BackendRefs with non-empty Group and Kind fields.
 	// If we found an InferencePool, configure the cluster for ORIGINAL_DST.
+	// Note: When multiple InferencePools are referenced, weighted cluster generation is
+	// handled in PostTranslateModify. Here we only handle single pool configurations.
 	if inferencePools := s.constructInferencePoolsFrom(req.PostClusterContext.BackendExtensionResources); inferencePools != nil {
-		if len(inferencePools) != 1 {
-			return nil, fmt.Errorf("BUG: at most one inferencepool can be referenced per route rule")
+		if len(inferencePools) == 1 {
+			// Single InferencePool - configure cluster for ORIGINAL_DST directly
+			s.handleInferencePoolCluster(req.Cluster, inferencePools[0])
 		}
-		s.handleInferencePoolCluster(req.Cluster, inferencePools[0])
+		// Multiple InferencePools case is handled in PostTranslateModify
+		// where weighted clusters are created per pool
 	}
 
 	return &egextension.PostClusterModifyResponse{Cluster: req.Cluster}, nil

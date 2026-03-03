@@ -448,8 +448,9 @@ spec:
 
                         BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources
                         from the Gateway API Inference Extension. When referencing InferencePool resources:
-                        - Only one InferencePool backend is allowed per rule
+                        - Multiple InferencePool backends are supported with weights for canary/A-B testing
                         - Cannot mix InferencePool with AIServiceBackend references in the same rule
+                        - Use SessionAffinity to preserve EPP scheduler patterns (KV cache locality)
                         - Fallback behavior is handled by the InferencePool's endpoint picker
 
                         For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends
@@ -803,6 +804,11 @@ spec:
                                 maxLength: 1024
                                 type: string
                             type: object
+                            # NOTE: CEL validations removed to avoid exceeding Kubernetes CRD validation budget.
+                            # The Path field inherits 11 CEL validations from Gateway API's HTTPPathMatch type.
+                            # Combined with other AIGatewayRoute validations, total cost exceeds K8s budget (~138%).
+                            # Envoy still validates paths at runtime - invalid paths return 404.
+                            # See CLAUDE.md "Known Issues" section for details.
                           pathRewrite:
                             description: |-
                               PathRewrite specifies how to rewrite the path before forwarding to the backend.
@@ -862,6 +868,73 @@ spec:
 
                         Default to "Envoy AI Gateway" if not set.
                       type: string
+                    sessionAffinity:
+                      description: |-
+                        SessionAffinity configures session affinity for weighted InferencePool routing.
+                        When multiple InferencePool backends are specified with weights, this ensures
+                        requests from the same session/user are consistently routed to the same pool,
+                        preserving EPP scheduler patterns like KV cache locality.
+
+                        This field is only used when multiple InferencePool backends are referenced
+                        in the same rule. For single InferencePool or AIServiceBackend references,
+                        this field is ignored.
+                      properties:
+                        fallback:
+                          allOf:
+                          - enum:
+                            - WeightedRandom
+                            - FirstBackend
+                            - RejectRequest
+                          - enum:
+                            - WeightedRandom
+                            - FirstBackend
+                            - RejectRequest
+                          default: WeightedRandom
+                          description: |-
+                            Fallback specifies behavior when no hash key is found from any source.
+                            - WeightedRandom: Use random weighted selection (no affinity)
+                            - FirstBackend: Always route to first backend (100% to primary)
+                            - RejectRequest: Return error if session affinity is required
+                          type: string
+                        hashOn:
+                          description: |-
+                            HashOn specifies sources to extract hash key from, in priority order.
+                            First non-empty value found will be used for consistent hashing.
+                            Same hash key always routes to the same pool (deterministic).
+                          items:
+                            description: HashSource defines a source to extract hash
+                              key from for session affinity.
+                            properties:
+                              jsonPath:
+                                description: |-
+                                  JSONPath to extract from request body.
+                                  Required when Type is RequestBody.
+                                  Uses JSONPath syntax: "$.user", "$.metadata.session_id", etc.
+                                type: string
+                              name:
+                                description: |-
+                                  Name of the header or query parameter.
+                                  Required when Type is Header or QueryParam.
+                                type: string
+                              type:
+                                allOf:
+                                - enum:
+                                  - Header
+                                  - RequestBody
+                                  - QueryParam
+                                - enum:
+                                  - Header
+                                  - RequestBody
+                                  - QueryParam
+                                description: Type specifies the source type to extract
+                                  the hash key from.
+                                type: string
+                            required:
+                            - type
+                            type: object
+                          maxItems: 5
+                          type: array
+                      type: object
                     timeouts:
                       description: |-
                         Timeouts defines the timeouts that can be configured for an HTTP request.
@@ -935,10 +1008,6 @@ spec:
                     rule: '!has(self.backendRefs) || size(self.backendRefs) == 0 ||
                       (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind))
                       || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))'
-                  - message: only one InferencePool backend is allowed per rule
-                    rule: '!has(self.backendRefs) || size(self.backendRefs) == 0 ||
-                      !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind))
-                      || size(self.backendRefs) == 1'
                 maxItems: 128
                 type: array
             required:

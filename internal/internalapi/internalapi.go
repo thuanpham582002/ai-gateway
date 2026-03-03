@@ -67,6 +67,11 @@ const (
 	// This is the default header name in the reference implementation:
 	// https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/2b5b337b45c3289e5f9367b2c19deef021722fcd/pkg/epp/server/runserver.go#L63
 	EndpointPickerHeaderKey = "x-gateway-destination-endpoint"
+
+	// SelectedPoolHeader is the header key used to indicate which InferencePool was selected
+	// for weighted routing. This is set by the extension server when modifying routes to use
+	// weighted clusters, allowing ExtProc to identify the selected pool.
+	SelectedPoolHeader = EnvoyAIGatewayHeaderPrefix + "selected-pool"
 )
 
 const (

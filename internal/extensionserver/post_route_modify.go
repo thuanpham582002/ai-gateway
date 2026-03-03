@@ -7,7 +7,6 @@ package extensionserver
 
 import (
 	"context"
-	"fmt"
 
 	egextension "github.com/envoyproxy/gateway/proto/extension"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -30,22 +29,26 @@ func (s *Server) PostRouteModify(_ context.Context, req *egextension.PostRouteMo
 	// Parse InferencePool resources from BackendExtensionResources.
 	inferencePools := s.constructInferencePoolsFrom(req.PostRouteContext.ExtensionResources)
 
-	// If we found an InferencePool, configure the route with the ext_proc per-route config.
-	if inferencePools != nil {
-		if len(inferencePools) != 1 {
-			return nil, fmt.Errorf("BUG: at most one inferencepool can be referenced per route rule but found %d", len(inferencePools))
-		}
+	// If we found InferencePool(s), configure the route with the ext_proc per-route config.
+	if len(inferencePools) > 0 {
 		// Disable auto host rewrite to prevent Envoy from overriding the host header
 		// set by the endpoint picker. The endpoint picker sets the destination via
 		// x-gateway-destination-endpoint header and we need to preserve the original
 		// host for proper routing to the selected endpoint.
-		req.Route.GetRoute().HostRewriteSpecifier = &routev3.RouteAction_AutoHostRewrite{
-			AutoHostRewrite: wrapperspb.Bool(false),
+		routeAction := req.Route.GetRoute()
+		if routeAction != nil {
+			routeAction.HostRewriteSpecifier = &routev3.RouteAction_AutoHostRewrite{
+				AutoHostRewrite: wrapperspb.Bool(false),
+			}
 		}
 		if req.Route.TypedPerFilterConfig == nil {
 			req.Route.TypedPerFilterConfig = make(map[string]*anypb.Any)
 		}
-		buildEPPMetadataForRoute(req.Route, inferencePools[0])
+		// Build EPP metadata for all InferencePools
+		// For weighted routing, all pools need their metadata attached to the route
+		for _, pool := range inferencePools {
+			buildEPPMetadataForRoute(req.Route, pool)
+		}
 	}
 
 	return &egextension.PostRouteModifyResponse{Route: req.Route}, nil
