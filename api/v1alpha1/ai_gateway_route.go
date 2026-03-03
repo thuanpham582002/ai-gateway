@@ -381,6 +381,41 @@ type AIGatewayRouteRuleMatch struct {
 	//
 	// +optional
 	Path *gwapiv1.HTTPPathMatch `json:"path,omitempty"`
+
+	// PathRewrite specifies how to rewrite the path before forwarding to the backend.
+	// This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
+	// needs to be rewritten to what the backend expects (e.g., /v1/completions).
+	//
+	// When using ReplacePrefixMatch, the matched prefix from Path will be replaced with
+	// the value specified here. For example:
+	//   Path: /v1/projects/myproject/locations/default/endpoints/abc123 (PathPrefix)
+	//   PathRewrite: /v1 (ReplacePrefixMatch)
+	//   Request: /v1/projects/myproject/locations/default/endpoints/abc123/completions
+	//   Result:  /v1/completions
+	//
+	// +optional
+	PathRewrite *HTTPPathRewrite `json:"pathRewrite,omitempty"`
+}
+
+// HTTPPathRewrite defines how to rewrite the path of incoming requests.
+type HTTPPathRewrite struct {
+	// Type specifies the type of path rewrite.
+	//
+	// +kubebuilder:validation:Enum=ReplacePrefixMatch;ReplaceFullPath
+	// +kubebuilder:default=ReplacePrefixMatch
+	Type string `json:"type,omitempty"`
+
+	// ReplacePrefixMatch specifies the value to replace the matched prefix with.
+	// Only valid when Type is ReplacePrefixMatch.
+	//
+	// +optional
+	ReplacePrefixMatch *string `json:"replacePrefixMatch,omitempty"`
+
+	// ReplaceFullPath specifies the value to replace the entire path with.
+	// Only valid when Type is ReplaceFullPath.
+	//
+	// +optional
+	ReplaceFullPath *string `json:"replaceFullPath,omitempty"`
 }
 
 type AIGatewayFilterConfig struct {

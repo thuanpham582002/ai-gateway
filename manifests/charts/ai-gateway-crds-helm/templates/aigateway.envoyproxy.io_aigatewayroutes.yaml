@@ -803,6 +803,37 @@ spec:
                                 maxLength: 1024
                                 type: string
                             type: object
+                          pathRewrite:
+                            description: |-
+                              PathRewrite specifies how to rewrite the path before forwarding to the backend.
+                              This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
+                              needs to be rewritten to what the backend expects (e.g., /v1/completions).
+
+                              When using ReplacePrefixMatch, the matched prefix from Path will be replaced with
+                              the value specified here. For example:
+                                Path: /v1/projects/myproject/locations/default/endpoints/abc123 (PathPrefix)
+                                PathRewrite: /v1 (ReplacePrefixMatch)
+                                Request: /v1/projects/myproject/locations/default/endpoints/abc123/completions
+                                Result:  /v1/completions
+                            properties:
+                              replaceFullPath:
+                                description: |-
+                                  ReplaceFullPath specifies the value to replace the entire path with.
+                                  Only valid when Type is ReplaceFullPath.
+                                type: string
+                              replacePrefixMatch:
+                                description: |-
+                                  ReplacePrefixMatch specifies the value to replace the matched prefix with.
+                                  Only valid when Type is ReplacePrefixMatch.
+                                type: string
+                              type:
+                                default: ReplacePrefixMatch
+                                description: Type specifies the type of path rewrite.
+                                enum:
+                                - ReplacePrefixMatch
+                                - ReplaceFullPath
+                                type: string
+                            type: object
                         type: object
                       maxItems: 128
                       type: array
