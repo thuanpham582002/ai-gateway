@@ -80,6 +80,7 @@ type AIGatewayRouteSpec struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(r1, self.all(r2, r1 == r2 || r1.name != r2.name))", message="rule names must be unique within the AIGatewayRoute"
 	Rules []AIGatewayRouteRule `json:"rules"`
 
 	// LLMRequestCosts specifies how to capture the cost of the LLM-related request, notably the token usage.
@@ -190,6 +191,14 @@ type AIGatewayRouteSpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind)) || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))", message="cannot mix InferencePool and AIServiceBackend references in the same rule"
 type AIGatewayRouteRule struct {
+	// Name is the identifier for this rule. Must be unique within the AIGatewayRoute.
+	// Used for observability (metrics, logs, traces) and debugging.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
 	// BackendRefs is the list of backends that this rule will route the traffic to.
 	// Each backend can have a weight that determines the traffic distribution.
 	//
