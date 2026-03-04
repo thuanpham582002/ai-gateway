@@ -909,6 +909,14 @@ spec:
 
                         Default to "Envoy AI Gateway" if not set.
                       type: string
+                    name:
+                      description: |-
+                        Name is the identifier for this rule. Must be unique within the AIGatewayRoute.
+                        Used for observability (metrics, logs, traces) and debugging.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
                     sessionAffinity:
                       description: |-
                         SessionAffinity configures session affinity for weighted InferencePool routing.
@@ -1018,6 +1026,8 @@ spec:
                         rule: '!(has(self.request) && has(self.backendRequest) &&
                           duration(self.request) != duration(''0s'') && duration(self.backendRequest)
                           > duration(self.request))'
+                  required:
+                  - name
                   type: object
                   x-kubernetes-validations:
                   - message: cannot mix InferencePool and AIServiceBackend references
@@ -1027,6 +1037,9 @@ spec:
                       || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))'
                 maxItems: 128
                 type: array
+                x-kubernetes-validations:
+                - message: rule names must be unique within the AIGatewayRoute
+                  rule: self.all(r1, self.all(r2, r1 == r2 || r1.name != r2.name))
             required:
             - rules
             type: object
