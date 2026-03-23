@@ -109,6 +109,64 @@ rate(gen_ai_server_request_errors_total{error_type="backend_error"}[5m])
 sum(gen_ai_server_request_errors_total) / sum(gen_ai_server_request_duration_count)
 ```
 
+### Kafka Per-Request Event Publishing
+
+Added per-request event streaming to Kafka for realtime dashboard support. Each request passing through ExtProc emits a JSON event containing request metadata, token usage, latency, and InferencePool routing info.
+
+**New Package:** `internal/events/`
+
+- `event.go` - `RequestEvent` and `TokenInfo` structs
+- `publisher.go` - `Publisher` and `Factory` interfaces
+- `noop.go` - No-op implementation (zero overhead when disabled)
+- `kafka.go` - Kafka AsyncProducer implementation using `github.com/IBM/sarama`
+- `scram.go` - SCRAM SASL auth helper
+
+**Modified Files:**
+
+- `internal/extproc/processor_impl.go` - Added `events.Publisher` to `upstreamProcessor`, emits events at all completion/error paths
+- `cmd/extproc/mainlib/main.go` - Added Kafka flags, event factory creation, graceful shutdown
+
+**ExtProc Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-kafkaBrokers` | `""` (disabled) | Comma-separated Kafka broker addresses |
+| `-kafkaTopic` | `ai-gateway-events` | Kafka topic name |
+| `-kafkaEventHeaderKeys` | `""` | Comma-separated request header keys to include in events |
+| `-kafkaSASLUser` | `""` | SASL username |
+| `-kafkaSASLPassword` | `""` | SASL password |
+| `-kafkaSASLMechanism` | `PLAIN` | SASL mechanism (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512) |
+| `-kafkaTLSEnabled` | `false` | Enable TLS |
+
+**Event JSON Schema:**
+
+```json
+{
+  "event_type": "request_completed",
+  "timestamp": "2026-03-23T10:30:00Z",
+  "request_id": "abc-123",
+  "operation": "chat",
+  "original_model": "qwen3-0.6b",
+  "request_model": "qwen3-0.6b",
+  "response_model": "Qwen/Qwen3-0.6B",
+  "backend": "openai",
+  "backend_name": "default/vllm-pool/route/my-route/rule/0/ref/0",
+  "success": true,
+  "latency_ms": 320.5,
+  "stream": true,
+  "time_to_first_token_ms": 85.2,
+  "inter_token_latency_ms": 12.3,
+  "tokens": { "input_tokens": 150, "output_tokens": 250, "total_tokens": 400 },
+  "selected_pool": "vllm-pool-v2",
+  "model_name_override": "Qwen/Qwen3-0.6B",
+  "headers": { "x-session-id": "sess-abc" }
+}
+```
+
+**Helm Configuration:**
+
+Pass Kafka config via `extProc.extraEnvVars` or add flags to the controller's `buildExtProcArgs()`.
+
 ### Path-Based Routing Support
 
 Added `Path` field to `AIGatewayRouteRuleMatch` for Vertex AI-style URL patterns:
