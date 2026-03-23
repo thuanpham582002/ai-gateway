@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
+	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/extproc"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -60,6 +61,20 @@ type extProcFlags struct {
 	maxRecvMsgSize int
 	// endpointPrefixes is the comma-separated key-value pairs for endpoint prefixes.
 	endpointPrefixes string
+	// kafkaBrokers is a comma-separated list of Kafka broker addresses for event publishing.
+	kafkaBrokers string
+	// kafkaTopic is the Kafka topic name for per-request events.
+	kafkaTopic string
+	// kafkaEventHeaderKeys is a comma-separated list of request header keys to include in events.
+	kafkaEventHeaderKeys string
+	// kafkaSASLUser is the SASL username for Kafka authentication.
+	kafkaSASLUser string
+	// kafkaSASLPassword is the SASL password for Kafka authentication.
+	kafkaSASLPassword string
+	// kafkaSASLMechanism is the SASL mechanism for Kafka authentication (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512).
+	kafkaSASLMechanism string
+	// kafkaTLSEnabled enables TLS for Kafka connections.
+	kafkaTLSEnabled bool
 }
 
 func setOptionalString(dst **string) func(string) error {
@@ -139,8 +154,48 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	fs.DurationVar(&flags.mcpWriteTimeout, "mcpWriteTimeout", 120*time.Second,
 		"The maximum duration before timing out writes of the MCP response")
 
+	// Kafka event publishing flags.
+	fs.StringVar(&flags.kafkaBrokers, "kafkaBrokers", "",
+		"Comma-separated Kafka broker addresses for per-request event publishing. When empty, event publishing is disabled.")
+	fs.StringVar(&flags.kafkaTopic, "kafkaTopic", "ai-gateway-events",
+		"Kafka topic name for per-request events.")
+	fs.StringVar(&flags.kafkaEventHeaderKeys, "kafkaEventHeaderKeys", "",
+		"Comma-separated request header keys to include in Kafka events.")
+	fs.StringVar(&flags.kafkaSASLUser, "kafkaSASLUser", "", "SASL username for Kafka authentication.")
+	fs.StringVar(&flags.kafkaSASLPassword, "kafkaSASLPassword", "", "SASL password for Kafka authentication.")
+	fs.StringVar(&flags.kafkaSASLMechanism, "kafkaSASLMechanism", "PLAIN",
+		"SASL mechanism for Kafka authentication (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512).")
+	fs.BoolVar(&flags.kafkaTLSEnabled, "kafkaTLSEnabled", false, "Enable TLS for Kafka connections.")
+
 	if err := fs.Parse(args); err != nil {
 		return extProcFlags{}, fmt.Errorf("failed to parse extProcFlags: %w", err)
+	}
+
+	// Kafka flags can also be set via environment variables (useful when deployed via Helm extraEnvVars).
+	if flags.kafkaBrokers == "" {
+		flags.kafkaBrokers = os.Getenv("KAFKA_BROKERS")
+	}
+	if flags.kafkaTopic == "ai-gateway-events" {
+		if v := os.Getenv("KAFKA_TOPIC"); v != "" {
+			flags.kafkaTopic = v
+		}
+	}
+	if flags.kafkaEventHeaderKeys == "" {
+		flags.kafkaEventHeaderKeys = os.Getenv("KAFKA_EVENT_HEADER_KEYS")
+	}
+	if flags.kafkaSASLUser == "" {
+		flags.kafkaSASLUser = os.Getenv("KAFKA_SASL_USER")
+	}
+	if flags.kafkaSASLPassword == "" {
+		flags.kafkaSASLPassword = os.Getenv("KAFKA_SASL_PASSWORD")
+	}
+	if flags.kafkaSASLMechanism == "PLAIN" {
+		if v := os.Getenv("KAFKA_SASL_MECHANISM"); v != "" {
+			flags.kafkaSASLMechanism = v
+		}
+	}
+	if !flags.kafkaTLSEnabled {
+		flags.kafkaTLSEnabled = os.Getenv("KAFKA_TLS_ENABLED") == "true"
 	}
 
 	if flags.configPath == "" {
@@ -286,6 +341,33 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	rerankMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationRerank)
 	mcpMetrics := metrics.NewMCP(meter, metricsRequestHeaderAttributes)
 
+	// Create event publisher factory for per-request Kafka events.
+	var eventFactory events.Factory
+	var eventShutdown func()
+	if flags.kafkaBrokers != "" {
+		brokers := strings.Split(flags.kafkaBrokers, ",")
+		var headerKeys []string
+		if flags.kafkaEventHeaderKeys != "" {
+			headerKeys = strings.Split(flags.kafkaEventHeaderKeys, ",")
+		}
+		cfg := events.KafkaConfig{
+			Brokers:       brokers,
+			Topic:         flags.kafkaTopic,
+			SASLUser:      flags.kafkaSASLUser,
+			SASLPassword:  flags.kafkaSASLPassword,
+			SASLMechanism: flags.kafkaSASLMechanism,
+			TLSEnabled:    flags.kafkaTLSEnabled,
+		}
+		eventFactory, eventShutdown, err = events.NewKafkaFactory(cfg, headerKeys, l)
+		if err != nil {
+			return fmt.Errorf("failed to create kafka event factory: %w", err)
+		}
+		l.Info("kafka event publishing enabled", slog.String("brokers", flags.kafkaBrokers), slog.String("topic", flags.kafkaTopic))
+	} else {
+		eventFactory = events.NewNoopFactory()
+		eventShutdown = func() {}
+	}
+
 	extproc.LogRequestHeaderAttributes = logRequestHeaderAttributes
 
 	server, err := extproc.NewServer(l, flags.enableRedaction)
@@ -293,22 +375,22 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		return fmt.Errorf("failed to create external processor server: %w", err)
 	}
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/chat/completions"), extproc.NewFactory(
-		chatCompletionMetricsFactory, tracing.ChatCompletionTracer(), endpointspec.ChatCompletionsEndpointSpec{}))
+		chatCompletionMetricsFactory, eventFactory, "chat", tracing.ChatCompletionTracer(), endpointspec.ChatCompletionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/completions"), extproc.NewFactory(
-		completionMetricsFactory, tracing.CompletionTracer(), endpointspec.CompletionsEndpointSpec{}))
+		completionMetricsFactory, eventFactory, "completion", tracing.CompletionTracer(), endpointspec.CompletionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/embeddings"), extproc.NewFactory(
-		embeddingsMetricsFactory, tracing.EmbeddingsTracer(), endpointspec.EmbeddingsEndpointSpec{}))
+		embeddingsMetricsFactory, eventFactory, "embeddings", tracing.EmbeddingsTracer(), endpointspec.EmbeddingsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses"), extproc.NewFactory(
-		responsesMetricsFactory, tracing.ResponsesTracer(), endpointspec.ResponsesEndpointSpec{}))
+		responsesMetricsFactory, eventFactory, "responses", tracing.ResponsesTracer(), endpointspec.ResponsesEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/audio/speech"), extproc.NewFactory(
-		speechMetricsFactory, tracing.SpeechTracer(), endpointspec.SpeechEndpointSpec{}))
+		speechMetricsFactory, eventFactory, "speech", tracing.SpeechTracer(), endpointspec.SpeechEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/images/generations"), extproc.NewFactory(
-		imageGenerationMetricsFactory, tracing.ImageGenerationTracer(), endpointspec.ImageGenerationEndpointSpec{}))
+		imageGenerationMetricsFactory, eventFactory, "image_generation", tracing.ImageGenerationTracer(), endpointspec.ImageGenerationEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Cohere, "/v2/rerank"), extproc.NewFactory(
-		rerankMetricsFactory, tracing.RerankTracer(), endpointspec.RerankEndpointSpec{}))
+		rerankMetricsFactory, eventFactory, "rerank", tracing.RerankTracer(), endpointspec.RerankEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/models"), extproc.NewModelsProcessor)
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Anthropic, "/v1/messages"), extproc.NewFactory(
-		messagesMetricsFactory, tracing.MessageTracer(), endpointspec.MessagesEndpointSpec{}))
+		messagesMetricsFactory, eventFactory, "messages", tracing.MessageTracer(), endpointspec.MessagesEndpointSpec{}))
 
 	// Create and register gRPC server with ExternalProcessorServer (the service Envoy calls).
 	if err = filterapi.StartConfigWatcher(ctx, flags.configPath, server, l, time.Second*5); err != nil {
@@ -386,6 +468,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		if err := metricsShutdown(shutdownCtx); err != nil {
 			l.Error("Failed to shutdown metrics gracefully", "error", err)
 		}
+		eventShutdown()
 		if mcpServer != nil {
 			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
 				l.Error("Failed to shutdown mcp proxy server gracefully", "error", err)
