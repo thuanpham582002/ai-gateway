@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -302,6 +303,36 @@ func (m *mockMetrics) RequireRequestSuccess(t *testing.T) {
 }
 
 var _ metrics.Metrics = &mockMetrics{}
+
+// mockEventFactory implements [events.Factory] for testing.
+type mockEventFactory struct{}
+
+func (m *mockEventFactory) NewPublisher(string) events.Publisher {
+	return &mockEventPublisher{}
+}
+
+// mockEventPublisher implements [events.Publisher] for testing.
+type mockEventPublisher struct {
+	publishCount int
+	lastSuccess  bool
+}
+
+func (m *mockEventPublisher) SetRequestID(string)                {}
+func (m *mockEventPublisher) SetOriginalModel(string)            {}
+func (m *mockEventPublisher) SetRequestModel(string)             {}
+func (m *mockEventPublisher) SetResponseModel(string)            {}
+func (m *mockEventPublisher) SetBackend(string)                  {}
+func (m *mockEventPublisher) SetBackendName(string)              {}
+func (m *mockEventPublisher) SetSelectedPool(string)             {}
+func (m *mockEventPublisher) SetModelNameOverride(string)        {}
+func (m *mockEventPublisher) SetStream(bool)                     {}
+func (m *mockEventPublisher) SetRequestHeaders(map[string]string) {}
+func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, _, _ float64) {
+	m.publishCount++
+	m.lastSuccess = success
+}
+
+var _ events.Publisher = &mockEventPublisher{}
 
 // mockBackendAuthHandler implements [filterapi.BackendAuthHandler] for testing.
 type mockBackendAuthHandler struct{}

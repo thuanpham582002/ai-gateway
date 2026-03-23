@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
+	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/headermutator"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -49,6 +51,7 @@ var LogRequestHeaderAttributes map[string]string
 //
 // Parameters:
 // * f: Metrics factory for creating metrics instances.
+// * ef: Event publisher factory for creating per-request event publishers.
 // * tracer: Request tracer for tracing requests and responses.
 // * parseBody: Function to parse the request body.
 // * selectTranslator: Function to select the appropriate translator based on the output schema.
@@ -57,6 +60,8 @@ var LogRequestHeaderAttributes map[string]string
 // * ProcessorFactory: A factory function to create processors based on the configuration.
 func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]](
 	f metrics.Factory,
+	ef events.Factory,
+	operation string,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	_ EndpointSpecT, // This is a type marker to bind EndpointSpecT without specifying ReqT, RespT, RespChunkT explicitly.
 ) ProcessorFactory {
@@ -65,7 +70,13 @@ func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.
 		if !isUpstreamFilter {
 			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction), nil
 		}
-		return newUpstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](requestHeaders, f.NewMetrics(), logger), nil
+		var pub events.Publisher
+		if ef != nil {
+			pub = ef.NewPublisher(operation)
+		} else {
+			pub = events.NewNoopFactory().NewPublisher(operation)
+		}
+		return newUpstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](requestHeaders, f.NewMetrics(), pub, logger), nil
 	}
 }
 
@@ -127,6 +138,9 @@ type (
 		costs metrics.TokenUsage
 		// metrics tracking.
 		metrics metrics.Metrics
+		// events publishing.
+		events       events.Publisher
+		requestStart time.Time
 	}
 )
 
@@ -150,12 +164,13 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 }
 
 func newUpstreamProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]](
-	reqHeader map[string]string, metrics metrics.Metrics,
+	reqHeader map[string]string, metrics metrics.Metrics, pub events.Publisher,
 	logger *slog.Logger,
 ) *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT] {
 	return &upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]{
 		requestHeaders: reqHeader,
 		metrics:        metrics,
+		events:         pub,
 		logger:         logger,
 	}
 }
@@ -319,16 +334,27 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
+			u.publishEvent(ctx, false, string(metrics.GenAIErrorTransformError), nil)
 		}
 	}()
 
 	// Start tracking metrics for this request.
 	u.metrics.StartRequest(u.requestHeaders)
+	u.requestStart = time.Now()
 	// Set the original model from the request body before any overrides
 	u.metrics.SetOriginalModel(u.parent.originalModel)
 	// Set the request model for metrics from the original model or override if applied.
 	reqModel := cmp.Or(u.requestHeaders[internalapi.ModelNameHeaderKeyDefault], u.parent.originalModel)
 	u.metrics.SetRequestModel(reqModel)
+
+	// Set up event publisher with request info.
+	if u.events != nil {
+		u.events.SetRequestID(u.requestHeaders["x-request-id"])
+		u.events.SetOriginalModel(u.parent.originalModel)
+		u.events.SetRequestModel(reqModel)
+		u.events.SetStream(u.parent.stream)
+		u.events.SetRequestHeaders(u.requestHeaders)
+	}
 
 	// We force the body mutation in the following cases:
 	// * The request is a retry request because the body mutation might have happened the previous iteration.
@@ -342,6 +368,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 			u.logger.Info("returning user-facing error for invalid request", slog.String("error", err.Error()))
 			// Record this as a failed request in metrics
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorInvalidRequest, u.requestHeaders)
+			u.publishEvent(ctx, false, string(metrics.GenAIErrorInvalidRequest), nil)
 			return createUserFacingErrorResponse(422, "UnprocessableEntity", userFacingErr.Error()), nil
 		}
 		return nil, fmt.Errorf("failed to transform request: %w", err)
@@ -445,6 +472,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
+			u.publishEvent(ctx, false, string(metrics.GenAIErrorTransformError), nil)
 		}
 	}()
 
@@ -479,15 +507,18 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		if err != nil {
 			// Transform errors from response processing
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
+			u.publishEvent(ctx, false, string(metrics.GenAIErrorTransformError), nil)
 			return
 		}
 		if errorType != metrics.GenAIErrorNone {
 			// Backend error (non-2xx response)
 			u.metrics.RecordRequestCompletion(ctx, false, errorType, u.requestHeaders)
+			u.publishEvent(ctx, false, string(errorType), nil)
 			return
 		}
 		if body.EndOfStream {
 			u.metrics.RecordRequestCompletion(ctx, true, metrics.GenAIErrorNone, u.requestHeaders)
+			u.publishEvent(ctx, true, "", u.buildTokenInfo())
 		}
 	}()
 
@@ -557,8 +588,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// Translator reports the latest cumulative token usage which we use to override existing costs.
 	u.costs.Override(tokenUsage)
 
-	// Set the response model for metrics
+	// Set the response model for metrics and events.
 	u.metrics.SetResponseModel(responseModel)
+	if u.events != nil {
+		u.events.SetResponseModel(responseModel)
+	}
 
 	// Record metrics.
 	if u.parent.stream {
@@ -620,6 +654,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorConfigError, u.requestHeaders)
+			u.publishEvent(ctx, false, string(metrics.GenAIErrorConfigError), nil)
 		}
 	}()
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])
@@ -631,6 +666,15 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	u.modelNameOverride = backend.Backend.ModelNameOverride
 	u.backendName = backend.Backend.Name
 	u.routeName = routeName
+
+	if u.events != nil {
+		u.events.SetBackend(string(backend.Backend.Schema.Name))
+		u.events.SetBackendName(backend.Backend.Name)
+		u.events.SetModelNameOverride(backend.Backend.ModelNameOverride)
+		if pool := rp.requestHeaders[internalapi.SelectedPoolHeader]; pool != "" {
+			u.events.SetSelectedPool(pool)
+		}
+	}
 	u.handler = backend.Handler
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
 	u.bodyMutator = bodymutator.NewBodyMutator(backend.Backend.BodyMutation, rp.originalRequestBodyRaw)
@@ -665,6 +709,36 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}
 
 	return
+}
+
+// publishEvent is a convenience wrapper that builds and publishes a request event.
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) publishEvent(ctx context.Context, success bool, errorType string, tokens *events.TokenInfo) {
+	if u.events == nil {
+		return
+	}
+	latencyMs := float64(time.Since(u.requestStart).Milliseconds())
+	var ttftMs, itlMs float64
+	if u.parent != nil && u.parent.stream {
+		ttftMs = u.metrics.GetTimeToFirstTokenMs()
+		itlMs = u.metrics.GetInterTokenLatencyMs()
+	}
+	u.events.Publish(ctx, success, errorType, tokens, latencyMs, ttftMs, itlMs)
+}
+
+// buildTokenInfo converts the accumulated costs to an events.TokenInfo.
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) buildTokenInfo() *events.TokenInfo {
+	input, _ := u.costs.InputTokens()
+	output, _ := u.costs.OutputTokens()
+	total, _ := u.costs.TotalTokens()
+	cached, _ := u.costs.CachedInputTokens()
+	cacheCreation, _ := u.costs.CacheCreationInputTokens()
+	return &events.TokenInfo{
+		InputTokens:              input,
+		OutputTokens:             output,
+		TotalTokens:              total,
+		CachedInputTokens:        cached,
+		CacheCreationInputTokens: cacheCreation,
+	}
 }
 
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) mergeWithTokenLatencyMetadata(metadata *structpb.Struct) {
