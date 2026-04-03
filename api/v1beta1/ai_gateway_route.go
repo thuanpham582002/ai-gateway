@@ -212,6 +212,10 @@ type AIGatewayRouteSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind)) || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))", message="cannot mix InferencePool and AIServiceBackend references in the same rule"
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind)) || size(self.backendRefs) == 1", message="only one InferencePool backend is allowed per rule"
 type AIGatewayRouteRule struct {
+	// Name is the name of the rule, unique within the route.
+	// +optional
+	Name string `json:"name,omitempty"`
+
 	// BackendRefs is the list of backends that this rule will route the traffic to.
 	// Each backend can have a weight that determines the traffic distribution.
 	//
@@ -381,6 +385,61 @@ type AIGatewayRouteRuleMatch struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	Headers []gwapiv1.HTTPHeaderMatch `json:"headers,omitempty"`
+
+	// Path specifies HTTP request path matcher.
+	//
+	// If not specified, the default rootPrefix path will be used.
+	// Use this field for Vertex AI-style path-based routing:
+	// /v1/projects/{project}/locations/{region}/endpoints/{id}
+	//
+	// +optional
+	Path *AIGatewayHTTPPathMatch `json:"path,omitempty"`
+
+	// PathRewrite specifies how to rewrite the path before forwarding to the backend.
+	// This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
+	// needs to be rewritten to what the backend expects (e.g., /v1/completions).
+	//
+	// +optional
+	PathRewrite *HTTPPathRewrite `json:"pathRewrite,omitempty"`
+}
+
+// AIGatewayHTTPPathMatch defines path matching without expensive CEL validations
+// that exceed K8s CRD validation budget when embedded in AIGatewayRoute.
+type AIGatewayHTTPPathMatch struct {
+	// Type specifies how to match against the path Value.
+	//
+	// +optional
+	// +kubebuilder:default=PathPrefix
+	// +kubebuilder:validation:Enum=Exact;PathPrefix;RegularExpression
+	Type *gwapiv1.PathMatchType `json:"type,omitempty"`
+
+	// Value of the HTTP path to match against.
+	//
+	// +optional
+	// +kubebuilder:default="/"
+	// +kubebuilder:validation:MaxLength=1024
+	Value *string `json:"value,omitempty"`
+}
+
+// HTTPPathRewrite defines how to rewrite the path of incoming requests.
+type HTTPPathRewrite struct {
+	// Type specifies the type of path rewrite.
+	//
+	// +kubebuilder:validation:Enum=ReplacePrefixMatch;ReplaceFullPath
+	// +kubebuilder:default=ReplacePrefixMatch
+	Type string `json:"type,omitempty"`
+
+	// ReplacePrefixMatch specifies the value to replace the matched prefix with.
+	// Only valid when Type is ReplacePrefixMatch.
+	//
+	// +optional
+	ReplacePrefixMatch *string `json:"replacePrefixMatch,omitempty"`
+
+	// ReplaceFullPath specifies the value to replace the entire path with.
+	// Only valid when Type is ReplaceFullPath.
+	//
+	// +optional
+	ReplaceFullPath *string `json:"replaceFullPath,omitempty"`
 }
 
 // HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will be applied to the request

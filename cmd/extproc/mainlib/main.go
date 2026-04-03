@@ -75,6 +75,8 @@ type extProcFlags struct {
 	kafkaSASLMechanism string
 	// kafkaTLSEnabled enables TLS for Kafka connections.
 	kafkaTLSEnabled bool
+	// kafkaRESTURL is the Kafka REST proxy URL for event publishing via HTTP.
+	kafkaRESTURL string
 }
 
 func setOptionalString(dst **string) func(string) error {
@@ -166,6 +168,8 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	fs.StringVar(&flags.kafkaSASLMechanism, "kafkaSASLMechanism", "PLAIN",
 		"SASL mechanism for Kafka authentication (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512).")
 	fs.BoolVar(&flags.kafkaTLSEnabled, "kafkaTLSEnabled", false, "Enable TLS for Kafka connections.")
+	fs.StringVar(&flags.kafkaRESTURL, "kafkaRESTURL", "",
+		"Kafka REST proxy URL for per-request event publishing via HTTP. Takes precedence over kafkaBrokers when both are set.")
 
 	if err := fs.Parse(args); err != nil {
 		return extProcFlags{}, fmt.Errorf("failed to parse extProcFlags: %w", err)
@@ -196,6 +200,9 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	}
 	if !flags.kafkaTLSEnabled {
 		flags.kafkaTLSEnabled = os.Getenv("KAFKA_TLS_ENABLED") == "true"
+	}
+	if flags.kafkaRESTURL == "" {
+		flags.kafkaRESTURL = os.Getenv("KAFKA_REST_URL")
 	}
 
 	if flags.configPath == "" {
@@ -343,15 +350,25 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	rerankMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationRerank)
 	mcpMetrics := metrics.NewMCP(meter, metricsRequestHeaderAttributes)
 
-	// Create event publisher factory for per-request Kafka events.
+	// Create event publisher factory for per-request events.
 	var eventFactory events.Factory
 	var eventShutdown func()
-	if flags.kafkaBrokers != "" {
-		brokers := strings.Split(flags.kafkaBrokers, ",")
-		var headerKeys []string
-		if flags.kafkaEventHeaderKeys != "" {
-			headerKeys = strings.Split(flags.kafkaEventHeaderKeys, ",")
+	var headerKeys []string
+	if flags.kafkaEventHeaderKeys != "" {
+		headerKeys = strings.Split(flags.kafkaEventHeaderKeys, ",")
+	}
+	if flags.kafkaRESTURL != "" {
+		cfg := events.KafkaRESTConfig{
+			URL:   flags.kafkaRESTURL,
+			Topic: flags.kafkaTopic,
 		}
+		eventFactory, eventShutdown, err = events.NewKafkaRESTFactory(cfg, headerKeys, l)
+		if err != nil {
+			return fmt.Errorf("failed to create kafka REST event factory: %w", err)
+		}
+		l.Info("kafka REST event publishing enabled", slog.String("url", flags.kafkaRESTURL), slog.String("topic", flags.kafkaTopic))
+	} else if flags.kafkaBrokers != "" {
+		brokers := strings.Split(flags.kafkaBrokers, ",")
 		cfg := events.KafkaConfig{
 			Brokers:       brokers,
 			Topic:         flags.kafkaTopic,
