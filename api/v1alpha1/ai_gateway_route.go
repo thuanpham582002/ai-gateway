@@ -397,7 +397,7 @@ type AIGatewayRouteRuleMatch struct {
 	// /v1/projects/{project}/locations/{region}/endpoints/{id}
 	//
 	// +optional
-	Path *gwapiv1.HTTPPathMatch `json:"path,omitempty"`
+	Path *AIGatewayHTTPPathMatch `json:"path,omitempty"`
 
 	// PathRewrite specifies how to rewrite the path before forwarding to the backend.
 	// This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
@@ -412,6 +412,19 @@ type AIGatewayRouteRuleMatch struct {
 	//
 	// +optional
 	PathRewrite *HTTPPathRewrite `json:"pathRewrite,omitempty"`
+}
+
+// AIGatewayHTTPPathMatch defines path matching without expensive CEL validations.
+type AIGatewayHTTPPathMatch struct {
+	// +optional
+	// +kubebuilder:default=PathPrefix
+	// +kubebuilder:validation:Enum=Exact;PathPrefix;RegularExpression
+	Type *gwapiv1.PathMatchType `json:"type,omitempty"`
+
+	// +optional
+	// +kubebuilder:default="/"
+	// +kubebuilder:validation:MaxLength=1024
+	Value *string `json:"value,omitempty"`
 }
 
 // HTTPPathRewrite defines how to rewrite the path of incoming requests.
