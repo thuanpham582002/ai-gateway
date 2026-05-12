@@ -18,15 +18,15 @@ func (f *noopFactory) NewPublisher(string) Publisher { return noopPublisher{} }
 
 type noopPublisher struct{}
 
-func (noopPublisher) SetRequestID(string)                {}
-func (noopPublisher) SetOriginalModel(string)            {}
-func (noopPublisher) SetRequestModel(string)             {}
-func (noopPublisher) SetResponseModel(string)            {}
-func (noopPublisher) SetBackend(string)                  {}
-func (noopPublisher) SetBackendName(string)              {}
-func (noopPublisher) SetSelectedPool(string)             {}
-func (noopPublisher) SetModelNameOverride(string)        {}
-func (noopPublisher) SetStream(bool)                     {}
+func (noopPublisher) SetRequestID(string)                 {}
+func (noopPublisher) SetOriginalModel(string)             {}
+func (noopPublisher) SetRequestModel(string)              {}
+func (noopPublisher) SetResponseModel(string)             {}
+func (noopPublisher) SetBackend(string)                   {}
+func (noopPublisher) SetBackendName(string)               {}
+func (noopPublisher) SetSelectedPool(string)              {}
+func (noopPublisher) SetModelNameOverride(string)         {}
+func (noopPublisher) SetStream(bool)                      {}
 func (noopPublisher) SetRequestHeaders(map[string]string) {}
 
 func (noopPublisher) Publish(context.Context, bool, string, *TokenInfo, float64, float64, float64) {

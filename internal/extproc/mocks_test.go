@@ -317,15 +317,15 @@ type mockEventPublisher struct {
 	lastSuccess  bool
 }
 
-func (m *mockEventPublisher) SetRequestID(string)                {}
-func (m *mockEventPublisher) SetOriginalModel(string)            {}
-func (m *mockEventPublisher) SetRequestModel(string)             {}
-func (m *mockEventPublisher) SetResponseModel(string)            {}
-func (m *mockEventPublisher) SetBackend(string)                  {}
-func (m *mockEventPublisher) SetBackendName(string)              {}
-func (m *mockEventPublisher) SetSelectedPool(string)             {}
-func (m *mockEventPublisher) SetModelNameOverride(string)        {}
-func (m *mockEventPublisher) SetStream(bool)                     {}
+func (m *mockEventPublisher) SetRequestID(string)                 {}
+func (m *mockEventPublisher) SetOriginalModel(string)             {}
+func (m *mockEventPublisher) SetRequestModel(string)              {}
+func (m *mockEventPublisher) SetResponseModel(string)             {}
+func (m *mockEventPublisher) SetBackend(string)                   {}
+func (m *mockEventPublisher) SetBackendName(string)               {}
+func (m *mockEventPublisher) SetSelectedPool(string)              {}
+func (m *mockEventPublisher) SetModelNameOverride(string)         {}
+func (m *mockEventPublisher) SetStream(bool)                      {}
 func (m *mockEventPublisher) SetRequestHeaders(map[string]string) {}
 func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, _, _ float64) {
 	m.publishCount++
