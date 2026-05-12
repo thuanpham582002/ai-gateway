@@ -1,0 +1,73 @@
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: ext-auth-backend
+  namespace: model-serving
+spec:
+  endpoints:
+    - ip:
+        address: 10.24.111.137
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ext-auth
+  namespace: model-serving
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+  extAuth:
+    http:
+      backendRef:
+        group: gateway.envoyproxy.io
+        kind: Backend
+        name: ext-auth-backend
+        port: 8000
+      headersToBackend:
+        - X-API-Key-ID
+        - X-Org-ID
+      path: /v2/ext-auth
+---
+# Patch listener to add authorization_request.allowed_headers to ext_authz filter
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata:
+  name: ext-auth-headers-to-auth
+  namespace: model-serving
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: ai-gateway
+  type: JSONPatch
+  jsonPatches:
+    - type: "type.googleapis.com/envoy.config.listener.v3.Listener"
+      name: "model-serving/ai-gateway/http"
+      operation:
+        op: add
+        path: "/default_filter_chain/filters/0/typed_config/http_filters/0/typed_config/http_service/authorization_request"
+        value:
+          allowed_headers:
+            patterns:
+              - exact: "x-ai-eg-model"
+                ignore_case: true
+              - exact: "Authorization"
+                ignore_case: true
+              - exact: "x-api-key"
+                ignore_case: true
+              - exact: "x-user-id"
+                ignore_case: true
+    # Forward request body to ext-auth so it can parse the model name
+    - type: "type.googleapis.com/envoy.config.listener.v3.Listener"
+      name: "model-serving/ai-gateway/http"
+      operation:
+        op: add
+        path: "/default_filter_chain/filters/0/typed_config/http_filters/0/typed_config/with_request_body"
+        value:
+          max_request_bytes: 8192
+          allow_partial_message: true
+          pack_as_bytes: false

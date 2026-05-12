@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

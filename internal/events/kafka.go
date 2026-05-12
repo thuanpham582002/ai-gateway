@@ -118,15 +118,15 @@ type kafkaPublisher struct {
 	headers           map[string]string
 }
 
-func (p *kafkaPublisher) SetRequestID(id string)            { p.requestID = id }
-func (p *kafkaPublisher) SetOriginalModel(model string)      { p.originalModel = model }
-func (p *kafkaPublisher) SetRequestModel(model string)       { p.requestModel = model }
-func (p *kafkaPublisher) SetResponseModel(model string)      { p.responseModel = model }
-func (p *kafkaPublisher) SetBackend(backend string)          { p.backend = backend }
-func (p *kafkaPublisher) SetBackendName(name string)         { p.backendName = name }
-func (p *kafkaPublisher) SetSelectedPool(pool string)        { p.selectedPool = pool }
-func (p *kafkaPublisher) SetModelNameOverride(override string) { p.modelNameOverride = override }
-func (p *kafkaPublisher) SetStream(stream bool)              { p.stream = stream }
+func (p *kafkaPublisher) SetRequestID(id string)                      { p.requestID = id }
+func (p *kafkaPublisher) SetOriginalModel(model string)               { p.originalModel = model }
+func (p *kafkaPublisher) SetRequestModel(model string)                { p.requestModel = model }
+func (p *kafkaPublisher) SetResponseModel(model string)               { p.responseModel = model }
+func (p *kafkaPublisher) SetBackend(backend string)                   { p.backend = backend }
+func (p *kafkaPublisher) SetBackendName(name string)                  { p.backendName = name }
+func (p *kafkaPublisher) SetSelectedPool(pool string)                 { p.selectedPool = pool }
+func (p *kafkaPublisher) SetModelNameOverride(override string)        { p.modelNameOverride = override }
+func (p *kafkaPublisher) SetStream(stream bool)                       { p.stream = stream }
 func (p *kafkaPublisher) SetRequestHeaders(headers map[string]string) { p.headers = headers }
 
 // Publish emits the accumulated event to Kafka asynchronously.
