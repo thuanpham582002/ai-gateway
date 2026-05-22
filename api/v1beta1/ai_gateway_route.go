@@ -64,6 +64,15 @@ type AIGatewayRouteSpec struct {
 	// +optional
 	ParentRefs []gwapiv1.ParentReference `json:"parentRefs,omitempty"`
 
+	// Hostnames defines a set of hostname matchers that should match against
+	// the HTTP Host header to select this route. The AI Gateway controller
+	// copies these values to the generated HTTPRoute.
+	//
+	// +kubebuilder:validation:MaxItems=16
+	//
+	// +optional
+	Hostnames []gwapiv1.Hostname `json:"hostnames,omitempty"`
+
 	// Rules is the list of AIGatewayRouteRule that this AIGatewayRoute will match the traffic to.
 	// Each rule is a subset of the HTTPRoute in the Gateway API (https://gateway-api.sigs.k8s.io/api-types/httproute/).
 	//
