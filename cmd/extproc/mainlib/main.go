@@ -349,6 +349,10 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	translationMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationTranslation)
 	rerankMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationRerank)
 	mcpMetrics := metrics.NewMCP(meter, metricsRequestHeaderAttributes)
+	kafkaMetrics, err := events.NewKafkaMetrics(meter)
+	if err != nil {
+		return fmt.Errorf("failed to create kafka event metrics: %w", err)
+	}
 
 	// Create event publisher factory for per-request events.
 	var eventFactory events.Factory
@@ -362,7 +366,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 			URL:   flags.kafkaRESTURL,
 			Topic: flags.kafkaTopic,
 		}
-		eventFactory, eventShutdown, err = events.NewKafkaRESTFactory(cfg, headerKeys, l)
+		eventFactory, eventShutdown, err = events.NewKafkaRESTFactory(cfg, headerKeys, l, kafkaMetrics)
 		if err != nil {
 			return fmt.Errorf("failed to create kafka REST event factory: %w", err)
 		}
@@ -377,7 +381,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 			SASLMechanism: flags.kafkaSASLMechanism,
 			TLSEnabled:    flags.kafkaTLSEnabled,
 		}
-		eventFactory, eventShutdown, err = events.NewKafkaFactory(cfg, headerKeys, l)
+		eventFactory, eventShutdown, err = events.NewKafkaFactory(cfg, headerKeys, l, kafkaMetrics)
 		if err != nil {
 			return fmt.Errorf("failed to create kafka event factory: %w", err)
 		}

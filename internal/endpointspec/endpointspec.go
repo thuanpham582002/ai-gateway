@@ -127,9 +127,9 @@ func (ChatCompletionsEndpointSpec) ParseBody(
 		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v1/chat/completions: %w", internalapi.ErrMalformedRequest, err)
 	}
 	var mutatedBody []byte
-	if req.Stream && costConfigured && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
-		// If the request is a streaming request and cost metrics are configured, we need to include usage in the response
-		// to avoid the bypassing of the token usage calculation.
+	if req.Stream && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
+		// If the request is a streaming request, include usage in the response so token usage and
+		// time-per-output-token metrics can be calculated even when the client omits stream_options.
 		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 		// Rewrite the original bytes to include the stream_options.include_usage=true so that forcing the request body
 		// mutation, which uses this raw body, will also result in the stream_options.include_usage=true.

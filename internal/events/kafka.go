@@ -31,14 +31,15 @@ type kafkaFactory struct {
 	topic      string
 	headerKeys map[string]bool // which request headers to include in events
 	logger     *slog.Logger
+	metrics    *KafkaMetrics
 }
 
 // NewKafkaFactory creates a Factory backed by Kafka.
 // Returns the factory, a shutdown function to flush and close the producer, and any error.
-func NewKafkaFactory(cfg KafkaConfig, headerKeys []string, logger *slog.Logger) (Factory, func(), error) {
+func NewKafkaFactory(cfg KafkaConfig, headerKeys []string, logger *slog.Logger, kafkaMetrics *KafkaMetrics) (Factory, func(), error) {
 	saramaCfg := sarama.NewConfig()
 	saramaCfg.Producer.Return.Errors = true
-	saramaCfg.Producer.Return.Successes = false // we don't need success confirmations
+	saramaCfg.Producer.Return.Successes = true
 	saramaCfg.Producer.Compression = sarama.CompressionSnappy
 	saramaCfg.Producer.RequiredAcks = sarama.WaitForLocal
 
@@ -80,12 +81,21 @@ func NewKafkaFactory(cfg KafkaConfig, headerKeys []string, logger *slog.Logger) 
 		topic:      cfg.Topic,
 		headerKeys: hk,
 		logger:     logger,
+		metrics:    kafkaMetrics,
 	}
 
-	// Drain error channel in background.
+	// Drain producer result channels in background.
 	go func() {
 		for err := range producer.Errors() {
+			operation, startedAt := kafkaMessageMetadata(err.Msg)
+			f.metrics.recordFailed(context.Background(), f.topic, operation, "sarama", "producer_error", startedAt)
 			f.logger.Error("kafka producer error", slog.Any("error", err.Err))
+		}
+	}()
+	go func() {
+		for msg := range producer.Successes() {
+			operation, startedAt := kafkaMessageMetadata(msg)
+			f.metrics.recordPublished(context.Background(), f.topic, operation, "sarama", startedAt)
 		}
 	}()
 
@@ -176,15 +186,38 @@ func (p *kafkaPublisher) Publish(_ context.Context, success bool, errorType stri
 		ModelNameOverride:   p.modelNameOverride,
 	}
 
+	ctx := context.Background()
+	p.factory.metrics.recordAttempt(ctx, p.factory.topic, p.operation, "sarama")
+	startedAt := time.Now()
+
 	data, err := json.Marshal(event)
 	if err != nil {
+		p.factory.metrics.recordFailed(ctx, p.factory.topic, p.operation, "sarama", "marshal_error", startedAt)
 		p.factory.logger.Error("failed to marshal event", slog.Any("error", err))
 		return
 	}
 
 	p.factory.producer.Input() <- &sarama.ProducerMessage{
-		Topic: p.factory.topic,
-		Key:   sarama.StringEncoder(p.requestID),
-		Value: sarama.ByteEncoder(data),
+		Topic:    p.factory.topic,
+		Key:      sarama.StringEncoder(p.requestID),
+		Value:    sarama.ByteEncoder(data),
+		Metadata: kafkaPublishMetadata{operation: p.operation, startedAt: startedAt},
 	}
+	p.factory.metrics.recordEnqueued(ctx, p.factory.topic, p.operation, "sarama")
+}
+
+type kafkaPublishMetadata struct {
+	operation string
+	startedAt time.Time
+}
+
+func kafkaMessageMetadata(msg *sarama.ProducerMessage) (string, time.Time) {
+	if msg == nil {
+		return "", time.Time{}
+	}
+	meta, ok := msg.Metadata.(kafkaPublishMetadata)
+	if !ok {
+		return "", time.Time{}
+	}
+	return meta.operation, meta.startedAt
 }

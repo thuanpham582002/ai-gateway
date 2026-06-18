@@ -177,10 +177,7 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		for _, opt := range []*openai.StreamOptions{nil, {IncludeUsage: false}} {
 			headers := map[string]string{":path": "/foo"}
 			p := &chatCompletionProcessorRouterFilter{
-				config: &filterapi.RuntimeConfig{
-					// Ensure that the stream_options.include_usage be forced to true.
-					RequestCosts: []filterapi.RuntimeRequestCost{{}},
-				},
+				config:         &filterapi.RuntimeConfig{},
 				requestHeaders: headers,
 				logger:         slog.Default(),
 				tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},

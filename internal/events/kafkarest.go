@@ -22,9 +22,10 @@ type kafkaRESTFactory struct {
 	topic      string
 	headerKeys map[string]bool
 	logger     *slog.Logger
+	metrics    *KafkaMetrics
 }
 
-func NewKafkaRESTFactory(cfg KafkaRESTConfig, headerKeys []string, logger *slog.Logger) (Factory, func(), error) {
+func NewKafkaRESTFactory(cfg KafkaRESTConfig, headerKeys []string, logger *slog.Logger, kafkaMetrics *KafkaMetrics) (Factory, func(), error) {
 	if cfg.URL == "" {
 		return nil, nil, fmt.Errorf("kafka REST URL is required")
 	}
@@ -44,6 +45,7 @@ func NewKafkaRESTFactory(cfg KafkaRESTConfig, headerKeys []string, logger *slog.
 		topic:      cfg.Topic,
 		headerKeys: hk,
 		logger:     logger,
+		metrics:    kafkaMetrics,
 	}
 
 	shutdown := func() {
@@ -137,8 +139,13 @@ func (p *kafkaRESTPublisher) Publish(_ context.Context, success bool, errorType 
 		ModelNameOverride:   p.modelNameOverride,
 	}
 
+	ctx := context.Background()
+	p.factory.metrics.recordAttempt(ctx, p.factory.topic, p.operation, "rest")
+	startedAt := time.Now()
+
 	eventData, err := json.Marshal(event)
 	if err != nil {
+		p.factory.metrics.recordFailed(ctx, p.factory.topic, p.operation, "rest", "marshal_error", startedAt)
 		p.factory.logger.Error("failed to marshal event", slog.Any("error", err))
 		return
 	}
@@ -154,6 +161,7 @@ func (p *kafkaRESTPublisher) Publish(_ context.Context, success bool, errorType 
 
 	body, err := json.Marshal(payload)
 	if err != nil {
+		p.factory.metrics.recordFailed(ctx, p.factory.topic, p.operation, "rest", "marshal_payload_error", startedAt)
 		p.factory.logger.Error("failed to marshal kafka REST payload", slog.Any("error", err))
 		return
 	}
@@ -163,6 +171,7 @@ func (p *kafkaRESTPublisher) Publish(_ context.Context, success bool, errorType 
 	go func() {
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
+			p.factory.metrics.recordFailed(context.Background(), p.factory.topic, p.operation, "rest", "request_create_error", startedAt)
 			p.factory.logger.Error("failed to create kafka REST request", slog.Any("error", err))
 			return
 		}
@@ -171,17 +180,21 @@ func (p *kafkaRESTPublisher) Publish(_ context.Context, success bool, errorType 
 
 		resp, err := p.factory.client.Do(req)
 		if err != nil {
+			p.factory.metrics.recordFailed(context.Background(), p.factory.topic, p.operation, "rest", "request_error", startedAt)
 			p.factory.logger.Error("failed to publish event via kafka REST", slog.Any("error", err))
 			return
 		}
 		defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
 
 		if resp.StatusCode >= 400 {
+			p.factory.metrics.recordFailed(context.Background(), p.factory.topic, p.operation, "rest", "http_error", startedAt)
 			respBody, _ := io.ReadAll(resp.Body)
 			p.factory.logger.Error("kafka REST publish failed",
 				slog.Int("status", resp.StatusCode),
 				slog.String("body", string(respBody)),
 			)
+			return
 		}
+		p.factory.metrics.recordPublished(context.Background(), p.factory.topic, p.operation, "rest", startedAt)
 	}()
 }
