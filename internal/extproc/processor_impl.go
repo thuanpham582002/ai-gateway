@@ -138,8 +138,9 @@ type (
 		// metrics tracking.
 		metrics metrics.Metrics
 		// events publishing.
-		events       events.Publisher
-		requestStart time.Time
+		events                events.Publisher
+		requestStart          time.Time
+		gatewayObservedTTFTMs *float64
 	}
 )
 
@@ -224,8 +225,7 @@ func createUserFacingErrorResponse(statusCode int, errorType string, message str
 
 // ProcessRequestBody implements [Processor.ProcessRequestBody].
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
-	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0
-	originalModel, body, stream, mutatedOriginalBody, err := r.eh.ParseBody(rawBody.Body, costConfigured)
+	originalModel, body, stream, mutatedOriginalBody, err := r.eh.ParseBody(rawBody.Body, true)
 	if err != nil {
 		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
 			// return to user as 400 -  e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
@@ -527,6 +527,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}, nil
 	}
 
+	u.recordGatewayObservedTTFT(time.Now())
+
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
@@ -676,8 +678,44 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) publishEvent
 	if u.parent != nil && u.parent.stream {
 		ttftMs = u.metrics.GetTimeToFirstTokenMs()
 		itlMs = u.metrics.GetInterTokenLatencyMs()
+	} else {
+		// Non-streaming responses do not expose token-level TTFT at ext-proc.
+		// Reuse the existing event field as gateway-observed first-response
+		// timing for compatibility with Core's ttft_ms column.
+		ttftMs = latencyMs
+	}
+	if u.gatewayObservedTTFTMs != nil {
+		ttftMs = *u.gatewayObservedTTFTMs
 	}
 	u.events.Publish(ctx, success, errorType, tokens, latencyMs, ttftMs, itlMs)
+}
+
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordGatewayObservedTTFT(now time.Time) {
+	if u.gatewayObservedTTFTMs != nil {
+		return
+	}
+	if e2eMs, ok := gatewayObservedElapsedMs(u.requestHeaders, now); ok {
+		u.gatewayObservedTTFTMs = &e2eMs
+	}
+}
+
+func gatewayObservedElapsedMs(requestHeaders map[string]string, now time.Time) (float64, bool) {
+	if requestHeaders == nil {
+		return 0, false
+	}
+	raw := requestHeaders[internalapi.GatewayRequestStartMsHeader]
+	if raw == "" {
+		return 0, false
+	}
+	startMs, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || startMs <= 0 {
+		return 0, false
+	}
+	elapsed := now.UnixMilli() - startMs
+	if elapsed < 0 {
+		return 0, false
+	}
+	return float64(elapsed), true
 }
 
 // buildTokenInfo converts the accumulated costs to an events.TokenInfo.

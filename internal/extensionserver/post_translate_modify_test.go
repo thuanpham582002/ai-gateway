@@ -8,9 +8,11 @@ package extensionserver
 import (
 	"testing"
 
+	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/stretchr/testify/require"
@@ -338,6 +340,106 @@ func Test_shouldAIGatewayExtProcBeInserted(t *testing.T) {
 		result := shouldAIGatewayExtProcBeInserted(tt.filters)
 		require.Equal(t, tt.expected, result)
 	}
+}
+
+func TestInsertGatewayRequestStartHeaderMutationFilter(t *testing.T) {
+	t.Run("inserts before ext_authz and overwrites client header", func(t *testing.T) {
+		mgr := &httpconnectionmanagerv3.HttpConnectionManager{
+			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
+				{Name: "envoy.filters.http.cors"},
+				{Name: extAuthzFilterName + "/securitypolicy/aip/inference-auth"},
+				{Name: aiGatewayExtProcName},
+				{Name: wellknown.Router},
+			},
+		}
+
+		err := insertGatewayRequestStartHeaderMutationFilter(mgr)
+		require.NoError(t, err)
+		require.Len(t, mgr.HttpFilters, 5)
+		require.Equal(t, "envoy.filters.http.cors", mgr.HttpFilters[0].Name)
+		require.Equal(t, gatewayRequestStartHeaderMutationName, mgr.HttpFilters[1].Name)
+		require.Equal(t, extAuthzFilterName+"/securitypolicy/aip/inference-auth", mgr.HttpFilters[2].Name)
+		require.Equal(t, aiGatewayExtProcName, mgr.HttpFilters[3].Name)
+		require.Equal(t, wellknown.Router, mgr.HttpFilters[4].Name)
+
+		cfg := &header_mutationv3.HeaderMutation{}
+		err = mgr.HttpFilters[1].GetTypedConfig().UnmarshalTo(cfg)
+		require.NoError(t, err)
+		require.Len(t, cfg.GetMutations().GetRequestMutations(), 1)
+		appendMutation, ok := cfg.GetMutations().GetRequestMutations()[0].GetAction().(*mutation_rulesv3.HeaderMutation_Append)
+		require.True(t, ok)
+		require.Equal(t, internalapi.GatewayRequestStartMsHeader, appendMutation.Append.GetHeader().GetKey())
+		require.Equal(t, envoyRequestStartTimeUnixMsFormatter, appendMutation.Append.GetHeader().GetValue())
+		require.Equal(t, corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, appendMutation.Append.GetAppendAction())
+	})
+
+	t.Run("inserts before aigateway extproc when ext_authz is absent", func(t *testing.T) {
+		mgr := &httpconnectionmanagerv3.HttpConnectionManager{
+			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
+				{Name: "envoy.filters.http.cors"},
+				{Name: aiGatewayExtProcName},
+				{Name: wellknown.Router},
+			},
+		}
+
+		err := insertGatewayRequestStartHeaderMutationFilter(mgr)
+		require.NoError(t, err)
+		require.Len(t, mgr.HttpFilters, 4)
+		require.Equal(t, gatewayRequestStartHeaderMutationName, mgr.HttpFilters[1].Name)
+		require.Equal(t, aiGatewayExtProcName, mgr.HttpFilters[2].Name)
+	})
+
+	t.Run("does not duplicate existing filter", func(t *testing.T) {
+		mgr := &httpconnectionmanagerv3.HttpConnectionManager{
+			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
+				{Name: gatewayRequestStartHeaderMutationName},
+				{Name: extAuthzFilterName},
+				{Name: aiGatewayExtProcName},
+				{Name: wellknown.Router},
+			},
+		}
+
+		err := insertGatewayRequestStartHeaderMutationFilter(mgr)
+		require.NoError(t, err)
+		require.Len(t, mgr.HttpFilters, 4)
+		require.Equal(t, gatewayRequestStartHeaderMutationName, mgr.HttpFilters[0].Name)
+	})
+}
+
+func TestInsertRouterLevelAIGatewayExtProcAddsRequestStartFilterWhenExtProcExists(t *testing.T) {
+	s := &Server{log: zap.New()}
+	hcm := &httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
+			{Name: "envoy.filters.http.cors"},
+			{Name: extAuthzFilterName},
+			{Name: aiGatewayExtProcName},
+			{Name: wellknown.Router},
+		},
+	}
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		DefaultFilterChain: &listenerv3.FilterChain{
+			Filters: []*listenerv3.Filter{
+				{
+					Name:       wellknown.HTTPConnectionManager,
+					ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustToAny(t, hcm)},
+				},
+			},
+		},
+	}
+
+	err := s.insertRouterLevelAIGatewayExtProc(listener)
+	require.NoError(t, err)
+
+	outHCM := &httpconnectionmanagerv3.HttpConnectionManager{}
+	err = listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(outHCM)
+	require.NoError(t, err)
+	require.Len(t, outHCM.HttpFilters, 5)
+	require.Equal(t, "envoy.filters.http.cors", outHCM.HttpFilters[0].Name)
+	require.Equal(t, gatewayRequestStartHeaderMutationName, outHCM.HttpFilters[1].Name)
+	require.Equal(t, extAuthzFilterName, outHCM.HttpFilters[2].Name)
+	require.Equal(t, aiGatewayExtProcName, outHCM.HttpFilters[3].Name)
+	require.Equal(t, wellknown.Router, outHCM.HttpFilters[4].Name)
 }
 
 func Test_findListenerRouteConfigs(t *testing.T) {

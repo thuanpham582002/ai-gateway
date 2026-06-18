@@ -315,6 +315,7 @@ func (m *mockEventFactory) NewPublisher(string) events.Publisher {
 type mockEventPublisher struct {
 	publishCount int
 	lastSuccess  bool
+	lastTTFTMs   float64
 }
 
 func (m *mockEventPublisher) SetRequestID(string)                 {}
@@ -327,9 +328,10 @@ func (m *mockEventPublisher) SetSelectedPool(string)              {}
 func (m *mockEventPublisher) SetModelNameOverride(string)         {}
 func (m *mockEventPublisher) SetStream(bool)                      {}
 func (m *mockEventPublisher) SetRequestHeaders(map[string]string) {}
-func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, _, _ float64) {
+func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, ttftMs, _ float64) {
 	m.publishCount++
 	m.lastSuccess = success
+	m.lastTTFTMs = ttftMs
 }
 
 var _ events.Publisher = &mockEventPublisher{}

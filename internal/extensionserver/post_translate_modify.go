@@ -39,8 +39,11 @@ import (
 )
 
 const (
-	extProcUDSClusterName = "ai-gateway-extproc-uds"
-	aiGatewayExtProcName  = "envoy.filters.http.ext_proc/aigateway"
+	extProcUDSClusterName                 = "ai-gateway-extproc-uds"
+	aiGatewayExtProcName                  = "envoy.filters.http.ext_proc/aigateway"
+	extAuthzFilterName                    = "envoy.filters.http.ext_authz"
+	gatewayRequestStartHeaderMutationName = "envoy.filters.http.header_mutation/aigateway_request_start"
+	envoyRequestStartTimeUnixMsFormatter  = "%START_TIME(%s%3f)%"
 )
 
 // PostTranslateModify allows an extension to modify the clusters and secrets in the xDS config
@@ -705,7 +708,16 @@ func (s *Server) insertRouterLevelAIGatewayExtProc(listener *listenerv3.Listener
 		}
 		// Check if the extproc filter is already present.
 		if !shouldAIGatewayExtProcBeInserted(httpConManager.HttpFilters) {
-			return nil // The filter is already present, nothing to do.
+			if err = insertGatewayRequestStartHeaderMutationFilter(httpConManager); err != nil {
+				return fmt.Errorf("failed to insert gateway request start header mutation filter: %w", err)
+			}
+			hcAny, err := toAny(httpConManager)
+			if err != nil {
+				return fmt.Errorf("failed to marshal updated HCM to Any: %w", err)
+			}
+			// Write the updated HCM back to the filter chain.
+			currChain.Filters[hcmIndex].ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: hcAny}
+			continue
 		}
 		epAny, err := toAny(&extprocv3.ExternalProcessor{
 			GrpcService: &corev3.GrpcService{
@@ -745,6 +757,9 @@ func (s *Server) insertRouterLevelAIGatewayExtProc(listener *listenerv3.Listener
 		// Insert the AI Gateway extproc filter as the first extproc filter.
 		if err = insertAIGatewayExtProcFilter(httpConManager, extProcFilter); err != nil {
 			return fmt.Errorf("failed to insert AI Gateway extproc filter: %w", err)
+		}
+		if err = insertGatewayRequestStartHeaderMutationFilter(httpConManager); err != nil {
+			return fmt.Errorf("failed to insert gateway request start header mutation filter: %w", err)
 		}
 		hcAny, err := toAny(httpConManager)
 		if err != nil {
@@ -1028,6 +1043,51 @@ func shouldAIGatewayExtProcBeInserted(filters []*httpconnectionmanagerv3.HttpFil
 		}
 	}
 	return true
+}
+
+func buildGatewayRequestStartHeaderMutationFilter() (*httpconnectionmanagerv3.HttpFilter, error) {
+	hmAny, err := toAny(&header_mutationv3.HeaderMutation{
+		Mutations: &header_mutationv3.Mutations{
+			RequestMutations: []*mutation_rulesv3.HeaderMutation{
+				{
+					Action: &mutation_rulesv3.HeaderMutation_Append{
+						Append: &corev3.HeaderValueOption{
+							Header: &corev3.HeaderValue{
+								Key:   internalapi.GatewayRequestStartMsHeader,
+								Value: envoyRequestStartTimeUnixMsFormatter,
+							},
+							AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal HeaderMutation to Any: %w", err)
+	}
+	return &httpconnectionmanagerv3.HttpFilter{
+		Name:       gatewayRequestStartHeaderMutationName,
+		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{TypedConfig: hmAny},
+	}, nil
+}
+
+func insertGatewayRequestStartHeaderMutationFilter(mgr *httpconnectionmanagerv3.HttpConnectionManager) error {
+	filter, err := buildGatewayRequestStartHeaderMutationFilter()
+	if err != nil {
+		return err
+	}
+	for i, existingFilter := range mgr.HttpFilters {
+		if existingFilter.Name == gatewayRequestStartHeaderMutationName {
+			return nil
+		}
+		if strings.HasPrefix(existingFilter.Name, extAuthzFilterName) || existingFilter.Name == aiGatewayExtProcName || existingFilter.Name == egv1a1.EnvoyFilterRouter.String() {
+			mgr.HttpFilters = append(mgr.HttpFilters[:i], append([]*httpconnectionmanagerv3.HttpFilter{filter}, mgr.HttpFilters[i:]...)...)
+			return nil
+		}
+	}
+	mgr.HttpFilters = append(mgr.HttpFilters, filter)
+	return nil
 }
 
 // insertAIGatewayExtProcFilter inserts the AI Gateway extproc filter into the HTTP connection manager.

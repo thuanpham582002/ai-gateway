@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
+	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/headermutator"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -196,6 +198,25 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 					// Gateway-level defaults alone must still force include_usage for streaming token accounting.
 					GlobalRequestCosts: []filterapi.RuntimeGlobalRequestCost{{}},
 				},
+				requestHeaders: headers,
+				logger:         slog.Default(),
+				tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+			}
+			resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", true, opt)})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			require.NotNil(t, p.originalRequestBody.StreamOptions)
+			require.True(t, p.forceBodyMutation)
+			require.True(t, p.originalRequestBody.StreamOptions.IncludeUsage)
+			require.Contains(t, string(p.originalRequestBodyRaw), `"stream_options":{"include_usage":true}`)
+		}
+	})
+
+	t.Run("ok_stream_without_include_usage_no_cost_config", func(t *testing.T) {
+		for _, opt := range []*openai.StreamOptions{nil, {IncludeUsage: false}} {
+			headers := map[string]string{":path": "/foo"}
+			p := &chatCompletionProcessorRouterFilter{
+				config:         &filterapi.RuntimeConfig{},
 				requestHeaders: headers,
 				logger:         slog.Default(),
 				tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
@@ -957,6 +978,66 @@ func Test_ProcessRequestHeaders_SetsRequestModel(t *testing.T) {
 	require.Equal(t, "header-model", mm.requestModel)
 	// Response model is not set until we get actual response
 	require.Empty(t, mm.responseModel)
+}
+
+func TestGatewayObservedElapsedMs(t *testing.T) {
+	now := time.UnixMilli(1781759000123)
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    float64
+		wantOK  bool
+	}{
+		{
+			name:    "valid gateway start",
+			headers: map[string]string{internalapi.GatewayRequestStartMsHeader: "1781758999000"},
+			want:    1123,
+			wantOK:  true,
+		},
+		{
+			name:    "missing",
+			headers: map[string]string{},
+		},
+		{
+			name:    "invalid",
+			headers: map[string]string{internalapi.GatewayRequestStartMsHeader: "bad"},
+		},
+		{
+			name:    "future",
+			headers: map[string]string{internalapi.GatewayRequestStartMsHeader: "1781759001123"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := gatewayObservedElapsedMs(tt.headers, now)
+			require.Equal(t, tt.wantOK, ok)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPublishEventUsesGatewayObservedFirstResponseBodyChunkTTFT(t *testing.T) {
+	publisher := &mockEventPublisher{}
+	metrics := &mockMetrics{timeToFirstTokenMs: 9000}
+	p := &chatCompletionProcessorUpstreamFilter{
+		requestHeaders: map[string]string{internalapi.GatewayRequestStartMsHeader: "1781758999000"},
+		metrics:        metrics,
+		events:         publisher,
+		requestStart:   time.UnixMilli(1781758999500),
+		parent: &chatCompletionProcessorRouterFilter{
+			stream: true,
+		},
+	}
+
+	p.recordGatewayObservedTTFT(time.UnixMilli(1781759000123))
+	p.recordGatewayObservedTTFT(time.UnixMilli(1781759005000))
+	p.publishEvent(t.Context(), true, "", &events.TokenInfo{})
+
+	require.Equal(t, 1, publisher.publishCount)
+	require.True(t, publisher.lastSuccess)
+	require.Equal(t, float64(1123), publisher.lastTTFTMs)
 }
 
 // Test_ProcessResponseBody_UsesActualResponseModel verifies that

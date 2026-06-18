@@ -46,6 +46,33 @@ func TestChatCompletionsEndpointSpec_ParseBody(t *testing.T) {
 		require.True(t, mutatedReq.StreamOptions.IncludeUsage)
 	})
 
+	t.Run("streaming_without_include_usage_when_forced", func(t *testing.T) {
+		req := openai.ChatCompletionRequest{Model: "gpt-4o", Stream: true}
+		body, err := json.Marshal(req)
+		require.NoError(t, err)
+
+		model, parsed, stream, mutated, err := spec.ParseBody(body, true)
+		require.NoError(t, err)
+		require.Equal(t, "gpt-4o", model)
+		require.True(t, stream)
+		require.NotNil(t, parsed)
+		require.NotNil(t, parsed.StreamOptions)
+		require.True(t, parsed.StreamOptions.IncludeUsage)
+		require.NotNil(t, mutated)
+	})
+
+	t.Run("streaming_without_include_usage_can_skip_mutation", func(t *testing.T) {
+		req := openai.ChatCompletionRequest{Model: "gpt-4o", Stream: true}
+		body, err := json.Marshal(req)
+		require.NoError(t, err)
+
+		_, parsed, _, mutated, err := spec.ParseBody(body, false)
+		require.NoError(t, err)
+		require.NotNil(t, parsed)
+		require.Nil(t, parsed.StreamOptions)
+		require.Nil(t, mutated)
+	})
+
 	t.Run("streaming_with_include_usage_already_true", func(t *testing.T) {
 		req := openai.ChatCompletionRequest{
 			Model:         "gpt-4.1",

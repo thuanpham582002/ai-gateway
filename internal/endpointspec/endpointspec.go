@@ -41,7 +41,7 @@ type (
 		//
 		// Parameters:
 		// * body: The raw request body as a byte slice.
-		// * costConfigured: A boolean indicating if cost metrics are configured.
+		// * forceStreamingUsage: A boolean indicating if streaming responses must include usage.
 		//
 		// Returns:
 		// * originalModel: The original model specified in the request.
@@ -49,7 +49,7 @@ type (
 		// * stream: A boolean indicating if the request is for streaming responses.
 		// * mutatedBody: The possibly mutated request body as a byte slice. Or nil if no mutation is needed.
 		// * err: An error if parsing fails.
-		ParseBody(body []byte, costConfigured bool) (originalModel internalapi.OriginalModel, req *ReqT, stream bool, mutatedBody []byte, err error)
+		ParseBody(body []byte, forceStreamingUsage bool) (originalModel internalapi.OriginalModel, req *ReqT, stream bool, mutatedBody []byte, err error)
 		// GetTranslator selects the appropriate translator based on the output API schema
 		// and an optional model name override.
 		//
@@ -97,16 +97,15 @@ type (
 // ParseBody implements [EndpointSpec.ParseBody].
 func (ChatCompletionsEndpointSpec) ParseBody(
 	body []byte,
-	costConfigured bool,
+	forceStreamingUsage bool,
 ) (internalapi.OriginalModel, *openai.ChatCompletionRequest, bool, []byte, error) {
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v1/chat/completions: %w", internalapi.ErrMalformedRequest, err)
 	}
 	var mutatedBody []byte
-	if req.Stream && costConfigured && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
-		// If the request is a streaming request and cost metrics are configured, we need to include usage in the response
-		// to avoid the bypassing of the token usage calculation.
+	if req.Stream && forceStreamingUsage && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
+		// Streaming responses need usage in the final chunk so downstream accounting can persist token counts.
 		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 		// Rewrite the original bytes to include the stream_options.include_usage=true so that forcing the request body
 		// mutation, which uses this raw body, will also result in the stream_options.include_usage=true.
