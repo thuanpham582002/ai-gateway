@@ -1,0 +1,28 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ai-gateway-proxy
+  namespace: envoy-ai-gateway-system
+spec:
+  telemetry:
+    tracing:
+      provider:
+        type: OpenTelemetry
+        serviceName: ai-gateway-envoy-proxy
+        backendRefs:
+        - name: otel-collector
+          namespace: monitoring
+          port: 4317
+        openTelemetry:
+          resourceAttributes:
+            service.name: ai-gateway-envoy-proxy
+            deployment.environment: server16
+      samplingRate: 5
+      spanName:
+        client: "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+        server: "router %UPSTREAM_CLUSTER%"
+      tags:
+        http.method: "%REQ(:METHOD)%"
+        http.host: "%REQ(:AUTHORITY)%"
+        ai.model.requested: "%REQ(X-AI-EG-MODEL)%"
+        ai.project.id: "%REQ(X-PROJECT-ID)%"
