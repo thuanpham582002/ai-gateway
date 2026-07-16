@@ -37,12 +37,12 @@ func (s *Server) PostRouteModify(_ context.Context, req *egextension.PostRouteMo
 			routeAction.HostRewriteSpecifier = &routev3.RouteAction_AutoHostRewrite{
 				AutoHostRewrite: wrapperspb.Bool(false),
 			}
-		}
-		if req.Route.TypedPerFilterConfig == nil {
-			req.Route.TypedPerFilterConfig = make(map[string]*anypb.Any)
-		}
-		for _, pool := range inferencePools {
-			buildEPPMetadataForRoute(req.Route, pool)
+			if req.Route.TypedPerFilterConfig == nil {
+				req.Route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+			}
+			for _, pool := range inferencePools {
+				buildEPPMetadataForRoute(req.Route, pool)
+			}
 		}
 	}
 

@@ -258,7 +258,7 @@ ai-gateway/
 ### Path-Based Routing
 
 ```yaml
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: route-ep-abc12345
@@ -288,7 +288,7 @@ spec:
 ### Weighted InferencePool with Session Affinity (Canary)
 
 ```yaml
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: llama3-canary

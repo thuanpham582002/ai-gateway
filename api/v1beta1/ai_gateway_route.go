@@ -210,7 +210,6 @@ type AIGatewayRouteSpec struct {
 // AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayRoute.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind)) || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))", message="cannot mix InferencePool and AIServiceBackend references in the same rule"
-// +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind)) || size(self.backendRefs) == 1", message="only one InferencePool backend is allowed per rule"
 type AIGatewayRouteRule struct {
 	// Name is the name of the rule, unique within the route.
 	// +optional
@@ -227,8 +226,9 @@ type AIGatewayRouteRule struct {
 	//
 	// BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources
 	// from the Gateway API Inference Extension. When referencing InferencePool resources:
-	// - Only one InferencePool backend is allowed per rule
+	// - Multiple InferencePool backends are supported with weights for canary and A/B testing
 	// - Cannot mix InferencePool with AIServiceBackend references in the same rule
+	// - Use SessionAffinity to preserve EPP scheduler patterns such as KV cache locality
 	// - Fallback behavior is handled by the InferencePool's endpoint picker
 	//
 	// For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends
@@ -285,6 +285,12 @@ type AIGatewayRouteRule struct {
 	// +optional
 	// +kubebuilder:validation:Format=date-time
 	ModelsCreatedAt *metav1.Time `json:"modelsCreatedAt,omitempty"`
+
+	// SessionAffinity configures deterministic selection among weighted InferencePool backends.
+	// It is ignored for a single InferencePool or AIServiceBackend references.
+	//
+	// +optional
+	SessionAffinity *SessionAffinityConfig `json:"sessionAffinity,omitempty"`
 }
 
 // AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
@@ -331,7 +337,7 @@ type AIGatewayRouteRuleBackendRef struct {
 	Kind *string `json:"kind,omitempty"`
 
 	// Name of the model in the backend. If provided this will override the name provided in the request.
-	// This field is ignored when referencing InferencePool resources.
+	// For InferencePool backends, this overrides the model name sent to the inference endpoint.
 	//
 	// +optional
 	ModelNameOverride string `json:"modelNameOverride,omitempty"`
@@ -493,6 +499,37 @@ type HTTPBodyMutation struct {
 	// +kubebuilder:validation:MaxItems=16
 	Remove []string `json:"remove,omitempty"`
 }
+
+// SessionAffinityConfig defines how to maintain affinity across weighted InferencePool backends.
+type SessionAffinityConfig struct {
+	// HashOn specifies hash-key sources in priority order. Envoy uses the first available value.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=5
+	HashOn []HashSource `json:"hashOn,omitempty"`
+}
+
+// HashSource defines a header or query parameter used as a session-affinity hash key.
+type HashSource struct {
+	// +kubebuilder:validation:Enum=Header;QueryParam
+	Type HashSourceType `json:"type"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// HashSourceType identifies a supported session-affinity hash source.
+//
+// +kubebuilder:validation:Enum=Header;QueryParam
+type HashSourceType string
+
+const (
+	// HashSourceHeader extracts the affinity key from an HTTP header.
+	HashSourceHeader HashSourceType = "Header"
+	// HashSourceQueryParam extracts the affinity key from a query parameter.
+	HashSourceQueryParam HashSourceType = "QueryParam"
+)
 
 // HTTPBodyField represents a JSON field name and value for body mutation
 type HTTPBodyField struct {

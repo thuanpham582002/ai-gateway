@@ -94,7 +94,6 @@ type AIGatewayRouteSpec struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxItems=15
-	// +kubebuilder:validation:XValidation:rule="self.all(r1, self.all(r2, r1 == r2 || r1.name != r2.name))", message="rule names must be unique within the AIGatewayRoute"
 	Rules []AIGatewayRouteRule `json:"rules"`
 
 	// LLMRequestCosts specifies how to capture the cost of the LLM-related request, notably the token usage.
@@ -211,15 +210,8 @@ type AIGatewayRouteSpec struct {
 // AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayRoute.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind)) || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))", message="cannot mix InferencePool and AIServiceBackend references in the same rule"
+// +kubebuilder:validation:XValidation:rule="!has(self.backendRefs) || size(self.backendRefs) == 0 || !self.backendRefs.exists(ref, has(ref.group) && has(ref.kind)) || size(self.backendRefs) == 1", message="only one InferencePool backend is allowed per rule"
 type AIGatewayRouteRule struct {
-	// Name is the identifier for this rule. Must be unique within the AIGatewayRoute.
-	// Used for observability (metrics, logs, traces) and debugging.
-	//
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Name string `json:"name"`
 	// BackendRefs is the list of backends that this rule will route the traffic to.
 	// Each backend can have a weight that determines the traffic distribution.
 	//
@@ -231,9 +223,8 @@ type AIGatewayRouteRule struct {
 	//
 	// BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources
 	// from the Gateway API Inference Extension. When referencing InferencePool resources:
-	// - Multiple InferencePool backends are supported with weights for canary/A-B testing
+	// - Only one InferencePool backend is allowed per rule
 	// - Cannot mix InferencePool with AIServiceBackend references in the same rule
-	// - Use SessionAffinity to preserve EPP scheduler patterns (KV cache locality)
 	// - Fallback behavior is handled by the InferencePool's endpoint picker
 	//
 	// For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends
@@ -290,18 +281,6 @@ type AIGatewayRouteRule struct {
 	// +optional
 	// +kubebuilder:validation:Format=date-time
 	ModelsCreatedAt *metav1.Time `json:"modelsCreatedAt,omitempty"`
-
-	// SessionAffinity configures session affinity for weighted InferencePool routing.
-	// When multiple InferencePool backends are specified with weights, this ensures
-	// requests from the same session/user are consistently routed to the same pool,
-	// preserving EPP scheduler patterns like KV cache locality.
-	//
-	// This field is only used when multiple InferencePool backends are referenced
-	// in the same rule. For single InferencePool or AIServiceBackend references,
-	// this field is ignored.
-	//
-	// +optional
-	SessionAffinity *SessionAffinityConfig `json:"sessionAffinity,omitempty"`
 }
 
 // AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
@@ -348,7 +327,7 @@ type AIGatewayRouteRuleBackendRef struct {
 	Kind *string `json:"kind,omitempty"`
 
 	// Name of the model in the backend. If provided this will override the name provided in the request.
-	// For InferencePool backends, this overrides the model name sent to the inference endpoint.
+	// This field is ignored when referencing InferencePool resources.
 	//
 	// +optional
 	ModelNameOverride string `json:"modelNameOverride,omitempty"`
@@ -402,64 +381,6 @@ type AIGatewayRouteRuleMatch struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	Headers []gwapiv1.HTTPHeaderMatch `json:"headers,omitempty"`
-
-	// Path specifies HTTP request path matcher. See HTTPPathMatch in the Gateway API for the details:
-	// https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPPathMatch
-	//
-	// If not specified, the default rootPrefix path will be used.
-	// Use this field for Vertex AI-style path-based routing:
-	// /v1/projects/{project}/locations/{region}/endpoints/{id}
-	//
-	// +optional
-	Path *AIGatewayHTTPPathMatch `json:"path,omitempty"`
-
-	// PathRewrite specifies how to rewrite the path before forwarding to the backend.
-	// This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
-	// needs to be rewritten to what the backend expects (e.g., /v1/completions).
-	//
-	// When using ReplacePrefixMatch, the matched prefix from Path will be replaced with
-	// the value specified here. For example:
-	//   Path: /v1/projects/myproject/locations/default/endpoints/abc123 (PathPrefix)
-	//   PathRewrite: /v1 (ReplacePrefixMatch)
-	//   Request: /v1/projects/myproject/locations/default/endpoints/abc123/completions
-	//   Result:  /v1/completions
-	//
-	// +optional
-	PathRewrite *HTTPPathRewrite `json:"pathRewrite,omitempty"`
-}
-
-// AIGatewayHTTPPathMatch defines path matching without expensive CEL validations.
-type AIGatewayHTTPPathMatch struct {
-	// +optional
-	// +kubebuilder:default=PathPrefix
-	// +kubebuilder:validation:Enum=Exact;PathPrefix;RegularExpression
-	Type *gwapiv1.PathMatchType `json:"type,omitempty"`
-
-	// +optional
-	// +kubebuilder:default="/"
-	// +kubebuilder:validation:MaxLength=1024
-	Value *string `json:"value,omitempty"`
-}
-
-// HTTPPathRewrite defines how to rewrite the path of incoming requests.
-type HTTPPathRewrite struct {
-	// Type specifies the type of path rewrite.
-	//
-	// +kubebuilder:validation:Enum=ReplacePrefixMatch;ReplaceFullPath
-	// +kubebuilder:default=ReplacePrefixMatch
-	Type string `json:"type,omitempty"`
-
-	// ReplacePrefixMatch specifies the value to replace the matched prefix with.
-	// Only valid when Type is ReplacePrefixMatch.
-	//
-	// +optional
-	ReplacePrefixMatch *string `json:"replacePrefixMatch,omitempty"`
-
-	// ReplaceFullPath specifies the value to replace the entire path with.
-	// Only valid when Type is ReplaceFullPath.
-	//
-	// +optional
-	ReplaceFullPath *string `json:"replaceFullPath,omitempty"`
 }
 
 // HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will be applied to the request
@@ -538,45 +459,3 @@ type HTTPBodyField struct {
 	// +kubebuilder:validation:Required
 	Value string `json:"value"`
 }
-
-// SessionAffinityConfig defines how to maintain session affinity
-// when routing between multiple weighted InferencePool backends.
-// This ensures requests from the same session/user are consistently
-// routed to the same pool, preserving EPP scheduler patterns like
-// KV cache locality and prefix caching.
-type SessionAffinityConfig struct {
-	// HashOn specifies sources to extract hash key from, in priority order.
-	// First non-empty value found will be used for consistent hashing.
-	// Same hash key always routes to the same pool (deterministic).
-	// When no hash key is found, Envoy falls back to random weighted selection.
-	//
-	// +optional
-	// +kubebuilder:validation:MaxItems=5
-	HashOn []HashSource `json:"hashOn,omitempty"`
-}
-
-// HashSource defines a source to extract hash key from for session affinity.
-type HashSource struct {
-	// Type specifies the source type to extract the hash key from.
-	//
-	// +kubebuilder:validation:Enum=Header;QueryParam
-	Type HashSourceType `json:"type"`
-
-	// Name of the header or query parameter.
-	//
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-}
-
-// HashSourceType specifies where to extract the hash key from.
-//
-// +kubebuilder:validation:Enum=Header;QueryParam
-type HashSourceType string
-
-const (
-	// HashSourceHeader extracts the hash key from an HTTP header.
-	HashSourceHeader HashSourceType = "Header"
-	// HashSourceQueryParam extracts the hash key from a query parameter.
-	HashSourceQueryParam HashSourceType = "QueryParam"
-)

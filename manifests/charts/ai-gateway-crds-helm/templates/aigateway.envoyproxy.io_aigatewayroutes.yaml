@@ -1,3 +1,8 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -1294,9 +1299,9 @@ spec:
 
                         BackendRefs can reference either AIServiceBackend resources (default) or InferencePool resources
                         from the Gateway API Inference Extension. When referencing InferencePool resources:
-                        - Multiple InferencePool backends are supported with weights for canary/A-B testing
+                        - Multiple InferencePool backends are supported with weights for canary and A/B testing
                         - Cannot mix InferencePool with AIServiceBackend references in the same rule
-                        - Use SessionAffinity to preserve EPP scheduler patterns (KV cache locality)
+                        - Use SessionAffinity to preserve EPP scheduler patterns such as KV cache locality
                         - Fallback behavior is handled by the InferencePool's endpoint picker
 
                         For AIServiceBackend references, you can achieve fallback behavior by configuring multiple backends
@@ -1363,7 +1368,7 @@ spec:
                                     }
                                 items:
                                   description: HTTPBodyField represents a JSON field
-                                    name and value for body mutation
+                                    name and value for body mutation.
                                   properties:
                                     path:
                                       description: |-
@@ -1636,25 +1641,25 @@ spec:
                             x-kubernetes-list-type: map
                           path:
                             description: |-
-                              Path specifies HTTP request path matcher. See HTTPPathMatch in the Gateway API for the details:
-                              https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPPathMatch
+                              Path specifies HTTP request path matcher.
 
                               If not specified, the default rootPrefix path will be used.
                               Use this field for Vertex AI-style path-based routing:
                               /v1/projects/{project}/locations/{region}/endpoints/{id}
                             properties:
                               type:
+                                allOf:
+                                - enum:
+                                  - Exact
+                                  - PathPrefix
+                                  - RegularExpression
+                                - enum:
+                                  - Exact
+                                  - PathPrefix
+                                  - RegularExpression
                                 default: PathPrefix
-                                description: |-
-                                  Type specifies how to match against the path Value.
-
-                                  Support: Core (Exact, PathPrefix)
-
-                                  Support: Implementation-specific (RegularExpression)
-                                enum:
-                                - Exact
-                                - PathPrefix
-                                - RegularExpression
+                                description: Type specifies how to match against the
+                                  path Value.
                                 type: string
                               value:
                                 default: /
@@ -1662,20 +1667,11 @@ spec:
                                 maxLength: 1024
                                 type: string
                             type: object
-                            # NOTE: CEL validations removed to stay within Kubernetes CRD budget.
-                            # Path validation is still performed by Envoy at runtime.
                           pathRewrite:
                             description: |-
                               PathRewrite specifies how to rewrite the path before forwarding to the backend.
                               This is useful when the incoming path (e.g., /v1/projects/xxx/endpoints/yyy/completions)
                               needs to be rewritten to what the backend expects (e.g., /v1/completions).
-
-                              When using ReplacePrefixMatch, the matched prefix from Path will be replaced with
-                              the value specified here. For example:
-                                Path: /v1/projects/myproject/locations/default/endpoints/abc123 (PathPrefix)
-                                PathRewrite: /v1 (ReplacePrefixMatch)
-                                Request: /v1/projects/myproject/locations/default/endpoints/abc123/completions
-                                Result:  /v1/completions
                             properties:
                               replaceFullPath:
                                 description: |-
@@ -1724,36 +1720,22 @@ spec:
                         Default to "Envoy AI Gateway" if not set.
                       type: string
                     name:
-                      description: |-
-                        Name is the identifier for this rule. Must be unique within the AIGatewayRoute.
-                        Used for observability (metrics, logs, traces) and debugging.
-                      maxLength: 63
-                      minLength: 1
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      description: Name is the name of the rule, unique within the
+                        route.
                       type: string
                     sessionAffinity:
                       description: |-
-                        SessionAffinity configures session affinity for weighted InferencePool routing.
-                        When multiple InferencePool backends are specified with weights, this ensures
-                        requests from the same session/user are consistently routed to the same pool,
-                        preserving EPP scheduler patterns like KV cache locality.
-
-                        This field is only used when multiple InferencePool backends are referenced
-                        in the same rule. For single InferencePool or AIServiceBackend references,
-                        this field is ignored.
+                        SessionAffinity configures deterministic selection among weighted InferencePool backends.
+                        It is ignored for a single InferencePool or AIServiceBackend references.
                       properties:
                         hashOn:
-                          description: |-
-                            HashOn specifies sources to extract hash key from, in priority order.
-                            First non-empty value found will be used for consistent hashing.
-                            Same hash key always routes to the same pool (deterministic).
-                            When no hash key is found, Envoy falls back to random weighted selection.
+                          description: HashOn specifies hash-key sources in priority
+                            order. Envoy uses the first available value.
                           items:
-                            description: HashSource defines a source to extract hash
-                              key from for session affinity.
+                            description: HashSource defines a header or query parameter
+                              used as a session-affinity hash key.
                             properties:
                               name:
-                                description: Name of the header or query parameter.
                                 minLength: 1
                                 type: string
                               type:
@@ -1764,8 +1746,8 @@ spec:
                                 - enum:
                                   - Header
                                   - QueryParam
-                                description: Type specifies the source type to extract
-                                  the hash key from.
+                                description: HashSourceType identifies a supported
+                                  session-affinity hash source.
                                 type: string
                             required:
                             - name
@@ -1840,8 +1822,6 @@ spec:
                         rule: '!(has(self.request) && has(self.backendRequest) &&
                           duration(self.request) != duration(''0s'') && duration(self.backendRequest)
                           > duration(self.request))'
-                  required:
-                  - name
                   type: object
                   x-kubernetes-validations:
                   - message: cannot mix InferencePool and AIServiceBackend references
@@ -1849,11 +1829,8 @@ spec:
                     rule: '!has(self.backendRefs) || size(self.backendRefs) == 0 ||
                       (self.backendRefs.all(ref, !has(ref.group) && !has(ref.kind))
                       || self.backendRefs.all(ref, has(ref.group) && has(ref.kind)))'
-                maxItems: 128
+                maxItems: 15
                 type: array
-                x-kubernetes-validations:
-                - message: rule names must be unique within the AIGatewayRoute
-                  rule: self.all(r1, self.all(r2, r1 == r2 || r1.name != r2.name))
             required:
             - rules
             type: object

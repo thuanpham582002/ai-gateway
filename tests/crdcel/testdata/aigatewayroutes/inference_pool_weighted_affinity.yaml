@@ -6,7 +6,7 @@
 # This is valid: multiple InferencePool backends with weights and session affinity
 # for canary/A-B testing with consistent routing for the same session
 
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: inference-pool-weighted-affinity
@@ -35,6 +35,5 @@ spec:
         hashOn:
           - type: Header
             name: X-Session-ID
-          - type: RequestBody
-            jsonPath: "$.user"
-        fallback: WeightedRandom
+          - type: QueryParam
+            name: session_id

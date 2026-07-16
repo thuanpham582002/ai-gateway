@@ -13,7 +13,7 @@ import (
 	"k8s.io/utils/ptr"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
@@ -122,7 +122,7 @@ func TestWeightedPoolIndexFromBackendRefs(t *testing.T) {
 	// Test simulating how getWeightedPoolsForRoute builds weightedPools with correct indices
 	t.Run("extracts correct indices from backendRefs", func(t *testing.T) {
 		// Simulate a rule with mixed backends
-		backendRefs := []aigv1a1.AIGatewayRouteRuleBackendRef{
+		backendRefs := []aigv1b1.AIGatewayRouteRuleBackendRef{
 			{
 				Name: "ai-service-backend", // Index 0 - not an InferencePool
 			},

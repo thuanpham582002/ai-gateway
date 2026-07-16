@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
@@ -110,9 +110,9 @@ func (s *Server) maybeCreateWeightedInferencePoolClusters(
 // weightedPoolsResult contains the result of getWeightedPoolsForRoute.
 type weightedPoolsResult struct {
 	Pools           []WeightedPool
-	Route           *aigv1a1.AIGatewayRoute
+	Route           *aigv1b1.AIGatewayRoute
 	RuleIndex       int
-	SessionAffinity *aigv1a1.SessionAffinityConfig
+	SessionAffinity *aigv1b1.SessionAffinityConfig
 }
 
 // getWeightedPoolsForRoute extracts InferencePool references and their weights from a route.
@@ -179,7 +179,7 @@ func (s *Server) getWeightedPoolsForRoute(route *routev3.Route) (*weightedPoolsR
 
 // getAIGatewayRouteFromRouteName extracts the AIGatewayRoute and rule index from a route name.
 // Route names follow the pattern: "httproute/<namespace>/<name>/rule/<rule_index>/match/<match_index>/*"
-func (s *Server) getAIGatewayRouteFromRouteName(routeName string) (*aigv1a1.AIGatewayRoute, int, error) {
+func (s *Server) getAIGatewayRouteFromRouteName(routeName string) (*aigv1b1.AIGatewayRoute, int, error) {
 	// Parse route name to extract namespace, name, and rule index
 	// Example: "httproute/testproject/route-ep-631844dd/rule/0/match/0/*"
 	parts := strings.Split(routeName, "/")
@@ -201,7 +201,7 @@ func (s *Server) getAIGatewayRouteFromRouteName(routeName string) (*aigv1a1.AIGa
 		}
 	}
 
-	var aigwRoute aigv1a1.AIGatewayRoute
+	var aigwRoute aigv1b1.AIGatewayRoute
 	if err := s.k8sClient.Get(context.Background(),
 		client.ObjectKey{Namespace: namespace, Name: name}, &aigwRoute); err != nil {
 		return nil, 0, err
@@ -245,7 +245,7 @@ func (s *Server) createOriginalDstClusterForPool(pool *gwaiev1.InferencePool, cl
 // modifyRouteToWeightedClusters modifies the route action to use weighted_clusters.
 // If session affinity is configured, it adds hash_policy to the route and enables
 // use_hash_policy on weighted_clusters for consistent cluster selection.
-func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPools []WeightedPool, sessionAffinity *aigv1a1.SessionAffinityConfig) error {
+func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPools []WeightedPool, sessionAffinity *aigv1b1.SessionAffinityConfig) error {
 	routeAction := route.GetRoute()
 	if routeAction == nil {
 		return fmt.Errorf("route %s has no route action", route.Name)
@@ -292,7 +292,7 @@ func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPoo
 		// Add hash_policy to the route action
 		for _, source := range sessionAffinity.HashOn {
 			switch source.Type {
-			case aigv1a1.HashSourceHeader:
+			case aigv1b1.HashSourceHeader:
 				routeAction.HashPolicy = append(routeAction.HashPolicy, &routev3.RouteAction_HashPolicy{
 					PolicySpecifier: &routev3.RouteAction_HashPolicy_Header_{
 						Header: &routev3.RouteAction_HashPolicy_Header{
@@ -301,7 +301,7 @@ func (s *Server) modifyRouteToWeightedClusters(route *routev3.Route, weightedPoo
 					},
 				})
 				s.log.Info("added hash policy for session affinity", "type", "header", "name", source.Name)
-			case aigv1a1.HashSourceQueryParam:
+			case aigv1b1.HashSourceQueryParam:
 				routeAction.HashPolicy = append(routeAction.HashPolicy, &routev3.RouteAction_HashPolicy{
 					PolicySpecifier: &routev3.RouteAction_HashPolicy_QueryParameter_{
 						QueryParameter: &routev3.RouteAction_HashPolicy_QueryParameter{
@@ -347,10 +347,10 @@ func (s *Server) addWeightedPoolsMetadata(route *routev3.Route, weightedPools []
 		route.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
 	}
 
-	m, ok := route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace]
+	m, ok := route.Metadata.FilterMetadata[aigv1b1.AIGatewayFilterMetadataNamespace]
 	if !ok {
 		m = &structpb.Struct{}
-		route.Metadata.FilterMetadata[aigv1a1.AIGatewayFilterMetadataNamespace] = m
+		route.Metadata.FilterMetadata[aigv1b1.AIGatewayFilterMetadataNamespace] = m
 	}
 	if m.Fields == nil {
 		m.Fields = make(map[string]*structpb.Value)
