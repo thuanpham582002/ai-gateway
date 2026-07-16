@@ -27,6 +27,7 @@ import (
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
+	"github.com/envoyproxy/ai-gateway/internal/compatibleauth"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/headermutator"
@@ -86,6 +87,20 @@ type mockTracer struct {
 	returnedSpan    tracingapi.ChatCompletionSpan
 }
 
+type fakeCompatibleAuthorizer struct {
+	decision      compatibleauth.Decision
+	matched       bool
+	err           error
+	path          string
+	authorization string
+	model         string
+}
+
+func (f *fakeCompatibleAuthorizer) Authorize(_ context.Context, path, authorization, model string) (compatibleauth.Decision, bool, error) {
+	f.path, f.authorization, f.model = path, authorization, model
+	return f.decision, f.matched, f.err
+}
+
 func (m *mockTracer) StartSpanAndInjectHeaders(_ context.Context, _ map[string]string, carrier propagation.TextMapCarrier, _ *openai.ChatCompletionRequest, _ []byte) tracingapi.ChatCompletionSpan {
 	m.startSpanCalled = true
 	carrier.Set("tracing-header", "1")
@@ -96,6 +111,74 @@ func (m *mockTracer) StartSpanAndInjectHeaders(_ context.Context, _ map[string]s
 }
 
 func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
+	t.Run("compatible auth denial", func(t *testing.T) {
+		authorizer := &fakeCompatibleAuthorizer{matched: true, decision: compatibleauth.Decision{
+			Status: 503,
+			Body:   []byte(`{"error":{"code":"DEPLOYMENT_SCALING_UP"}}`),
+			Headers: []compatibleauth.Header{
+				{Name: "content-type", Value: "application/json"},
+				{Name: "retry-after", Value: "30"},
+			},
+		}}
+		p := &chatCompletionProcessorRouterFilter{
+			config: &filterapi.RuntimeConfig{}, requestHeaders: map[string]string{
+				":path": "/inference/v1/chat/completions", "authorization": "Bearer tenant-key",
+			},
+			logger: slog.Default(), authorizer: authorizer,
+		}
+		response, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{
+			Body: bodyFromModel(t, "deployment-id", false, nil),
+		})
+		require.NoError(t, err)
+		immediate := response.GetImmediateResponse()
+		require.NotNil(t, immediate)
+		require.Equal(t, typev3.StatusCode(503), immediate.Status.Code)
+		require.JSONEq(t, `{"error":{"code":"DEPLOYMENT_SCALING_UP"}}`, string(immediate.Body))
+		require.Equal(t, "30", headers(immediate.Headers.SetHeaders)["retry-after"])
+		require.Equal(t, "/inference/v1/chat/completions", authorizer.path)
+		require.Equal(t, "Bearer tenant-key", authorizer.authorization)
+		require.Equal(t, "deployment-id", authorizer.model)
+	})
+
+	t.Run("compatible auth canonical model", func(t *testing.T) {
+		authorizer := &fakeCompatibleAuthorizer{matched: true, decision: compatibleauth.Decision{
+			Allowed: true, Model: "canonical-deployment-id",
+		}}
+		p := &chatCompletionProcessorRouterFilter{
+			config: &filterapi.RuntimeConfig{}, requestHeaders: map[string]string{
+				":path": "/inference/v1/chat/completions", "authorization": "Bearer tenant-key",
+			},
+			logger: slog.Default(), authorizer: authorizer,
+			tracer: tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+		}
+		response, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{
+			Body: bodyFromModel(t, "mr-canonical-deployment-id", false, nil),
+		})
+		require.NoError(t, err)
+		requestBody := response.GetRequestBody()
+		require.NotNil(t, requestBody)
+		modelHeader := requestBody.Response.HeaderMutation.SetHeaders[0].Header
+		require.Equal(t, internalapi.ModelNameHeaderKeyDefault, modelHeader.Key)
+		require.Equal(t, "canonical-deployment-id", string(modelHeader.RawValue))
+	})
+
+	t.Run("compatible auth dependency fails closed", func(t *testing.T) {
+		p := &chatCompletionProcessorRouterFilter{
+			config: &filterapi.RuntimeConfig{}, requestHeaders: map[string]string{
+				":path": "/inference/v1/chat/completions", "authorization": "Bearer tenant-key",
+			},
+			logger: slog.Default(), authorizer: &fakeCompatibleAuthorizer{matched: true, err: errors.New("unavailable")},
+		}
+		response, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{
+			Body: bodyFromModel(t, "deployment-id", false, nil),
+		})
+		require.NoError(t, err)
+		immediate := response.GetImmediateResponse()
+		require.NotNil(t, immediate)
+		require.Equal(t, typev3.StatusCode(503), immediate.Status.Code)
+		require.Contains(t, string(immediate.Body), `"code":"DEPENDENCY_UNAVAILABLE"`)
+	})
+
 	t.Run("body parser error", func(t *testing.T) {
 		p := &chatCompletionProcessorRouterFilter{
 			tracer: tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},

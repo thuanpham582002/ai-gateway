@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
+	"github.com/envoyproxy/ai-gateway/internal/compatibleauth"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -80,6 +81,25 @@ func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.
 	}
 }
 
+func NewFactoryWithCompatibleAuth[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]](
+	f metrics.Factory,
+	ef events.Factory,
+	operation string,
+	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
+	endpointSpec EndpointSpecT,
+	authorizer compatibleauth.Authorizer,
+) ProcessorFactory {
+	factory := NewFactory(f, ef, operation, tracer, endpointSpec)
+	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
+		processor, err := factory(config, requestHeaders, logger, isUpstreamFilter, enableRedaction)
+		if err != nil || isUpstreamFilter {
+			return processor, err
+		}
+		processor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]).authorizer = authorizer
+		return processor, nil
+	}
+}
+
 type (
 	// routerProcessor implements [Processor] for the router filter for the standard LLM endpoints.
 	routerProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]] struct {
@@ -114,6 +134,7 @@ type (
 		stream              bool
 		debugLogEnabled     bool
 		enableRedaction     bool
+		authorizer          compatibleauth.Authorizer
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -247,6 +268,25 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		}
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
+	authorizedModel := string(originalModel)
+	if r.authorizer != nil {
+		decision, matched, authErr := r.authorizer.Authorize(
+			ctx, r.requestHeaders[":path"], r.requestHeaders["authorization"], authorizedModel,
+		)
+		if authErr != nil {
+			return compatibleAuthImmediateResponse(compatibleauth.Decision{
+				Status:  503,
+				Body:    []byte(`{"error":{"message":"compatible authentication is unavailable","type":"server_error","code":"DEPENDENCY_UNAVAILABLE"}}`),
+				Headers: []compatibleauth.Header{{Name: "content-type", Value: "application/json"}},
+			}), nil
+		}
+		if matched && !decision.Allowed {
+			return compatibleAuthImmediateResponse(decision), nil
+		}
+		if matched && decision.Model != "" {
+			authorizedModel = decision.Model
+		}
+	}
 
 	// Use the request-scoped logger from context if available, otherwise fall back to processor logger
 	logger := loggerFromContext(ctx)
@@ -274,12 +314,12 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		r.originalRequestBodyRaw = rawBody.Body
 	}
 
-	r.requestHeaders[internalapi.ModelNameHeaderKeyDefault] = originalModel
+	r.requestHeaders[internalapi.ModelNameHeaderKeyDefault] = authorizedModel
 
 	var additionalHeaders []*corev3.HeaderValueOption
 	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
 		// Set the original model to the request header with the key `x-ai-eg-model`.
-		Header: &corev3.HeaderValue{Key: internalapi.ModelNameHeaderKeyDefault, RawValue: []byte(originalModel)},
+		Header: &corev3.HeaderValue{Key: internalapi.ModelNameHeaderKeyDefault, RawValue: []byte(authorizedModel)},
 	})
 	originalPath := r.requestHeaders[":path"]
 	r.requestHeaders[originalPathHeader] = originalPath
@@ -318,6 +358,28 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 			},
 		},
 	}, nil
+}
+
+func compatibleAuthImmediateResponse(decision compatibleauth.Decision) *extprocv3.ProcessingResponse {
+	headerMutation := &extprocv3.HeaderMutation{}
+	hasContentType := false
+	for _, header := range decision.Headers {
+		if strings.TrimSpace(header.Name) == "" {
+			continue
+		}
+		setHeader(headerMutation, header.Name, header.Value)
+		hasContentType = hasContentType || strings.EqualFold(header.Name, "content-type")
+	}
+	if !hasContentType {
+		setHeader(headerMutation, "content-type", "application/json")
+	}
+	setHeader(headerMutation, "content-length", strconv.Itoa(len(decision.Body)))
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ImmediateResponse{ImmediateResponse: &extprocv3.ImmediateResponse{
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode(decision.Status)}, Headers: headerMutation,
+			Body: decision.Body, GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.PermissionDenied)},
+		}},
+	}
 }
 
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) onRetry() bool {
