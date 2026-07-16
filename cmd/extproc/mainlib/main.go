@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/envoyproxy/ai-gateway/internal/compatibleauth"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/events"
 	"github.com/envoyproxy/ai-gateway/internal/extproc"
@@ -386,13 +387,27 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	}
 
 	extproc.LogRequestHeaderAttributes = logRequestHeaderAttributes
+	var compatibleAuthorizer compatibleauth.Authorizer
+	if address := strings.TrimSpace(os.Getenv("COMPATIBLE_EXT_AUTH_GRPC_ADDR")); address != "" {
+		pathPrefix := strings.TrimSpace(os.Getenv("COMPATIBLE_INFERENCE_PATH_PREFIX"))
+		if pathPrefix == "" {
+			pathPrefix = "/inference/"
+		}
+		client, err := compatibleauth.Dial(address, pathPrefix)
+		if err != nil {
+			return fmt.Errorf("configure compatible inference auth: %w", err)
+		}
+		defer client.Close()
+		compatibleAuthorizer = client
+		l.Info("compatible inference auth enabled", slog.String("pathPrefix", pathPrefix))
+	}
 
 	server, err := extproc.NewServer(l, flags.enableRedaction)
 	if err != nil {
 		return fmt.Errorf("failed to create external processor server: %w", err)
 	}
-	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/chat/completions"), extproc.NewFactory(
-		chatCompletionMetricsFactory, eventFactory, "chat", tracing.ChatCompletionTracer(), endpointspec.ChatCompletionsEndpointSpec{}))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/chat/completions"), extproc.NewFactoryWithCompatibleAuth(
+		chatCompletionMetricsFactory, eventFactory, "chat", tracing.ChatCompletionTracer(), endpointspec.ChatCompletionsEndpointSpec{}, compatibleAuthorizer))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/completions"), extproc.NewFactory(
 		completionMetricsFactory, eventFactory, "completion", tracing.CompletionTracer(), endpointspec.CompletionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/embeddings"), extproc.NewFactory(
