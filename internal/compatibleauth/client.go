@@ -46,6 +46,26 @@ type Client struct {
 	pathPrefix string
 }
 
+type unavailableAuthorizer struct {
+	pathPrefix string
+}
+
+func NewUnavailableAuthorizer(pathPrefix string) Authorizer {
+	return &unavailableAuthorizer{pathPrefix: strings.TrimSpace(pathPrefix)}
+}
+
+func (a *unavailableAuthorizer) Authorize(
+	_ context.Context,
+	path string,
+	_ string,
+	_ string,
+) (Decision, bool, error) {
+	if a == nil || a.pathPrefix == "" || !strings.HasPrefix(path, a.pathPrefix) {
+		return Decision{}, false, nil
+	}
+	return Decision{}, true, errors.New("compatible auth is not configured")
+}
+
 func Dial(address, pathPrefix string) (*Client, error) {
 	address = strings.TrimSpace(address)
 	pathPrefix = strings.TrimSpace(pathPrefix)

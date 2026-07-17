@@ -39,7 +39,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.controller.securityContext | nindent 12 }}
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.controller.image.repository }}{{ if .Values.controller.image.digest }}@{{ .Values.controller.image.digest }}{{ else }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}{{ end }}"
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           ports:
             {{- range .Values.controller.service.ports }}
@@ -47,7 +47,7 @@ spec:
             {{- end }}
           args:
             - -logLevel={{ .Values.controller.logLevel }}
-            - --extProcImage={{ .Values.extProc.image.repository }}:{{ .Values.extProc.image.tag | default .Chart.AppVersion }}
+            - --extProcImage={{ .Values.extProc.image.repository }}{{ if .Values.extProc.image.digest }}@{{ .Values.extProc.image.digest }}{{ else }}:{{ .Values.extProc.image.tag | default .Chart.AppVersion }}{{ end }}
             - --extProcImagePullPolicy={{ .Values.extProc.imagePullPolicy }}
             - --extProcLogLevel={{ .Values.extProc.logLevel }}
             {{- if .Values.extProc.enableRedaction }}

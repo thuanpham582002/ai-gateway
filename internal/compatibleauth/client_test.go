@@ -75,3 +75,17 @@ func TestAuthorizeReturnsCanonicalAllowedModel(t *testing.T) {
 	require.True(t, decision.Allowed)
 	require.Equal(t, "canonical-id", decision.Model)
 }
+
+func TestUnavailableAuthorizerFailsClosedOnlyForCompatiblePath(t *testing.T) {
+	authorizer := NewUnavailableAuthorizer("/inference/")
+
+	decision, matched, err := authorizer.Authorize(t.Context(), "/inference/v1/chat/completions", "Bearer key", "model")
+	require.Error(t, err)
+	require.True(t, matched)
+	require.False(t, decision.Allowed)
+
+	decision, matched, err = authorizer.Authorize(t.Context(), "/v1/chat/completions", "Bearer key", "model")
+	require.NoError(t, err)
+	require.False(t, matched)
+	require.False(t, decision.Allowed)
+}

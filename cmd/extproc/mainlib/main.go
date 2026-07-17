@@ -387,19 +387,21 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	}
 
 	extproc.LogRequestHeaderAttributes = logRequestHeaderAttributes
-	var compatibleAuthorizer compatibleauth.Authorizer
+	compatiblePathPrefix := strings.TrimSpace(os.Getenv("COMPATIBLE_INFERENCE_PATH_PREFIX"))
+	if compatiblePathPrefix == "" {
+		compatiblePathPrefix = "/inference/"
+	}
+	compatibleAuthorizer := compatibleauth.NewUnavailableAuthorizer(compatiblePathPrefix)
 	if address := strings.TrimSpace(os.Getenv("COMPATIBLE_EXT_AUTH_GRPC_ADDR")); address != "" {
-		pathPrefix := strings.TrimSpace(os.Getenv("COMPATIBLE_INFERENCE_PATH_PREFIX"))
-		if pathPrefix == "" {
-			pathPrefix = "/inference/"
-		}
-		client, err := compatibleauth.Dial(address, pathPrefix)
+		client, err := compatibleauth.Dial(address, compatiblePathPrefix)
 		if err != nil {
 			return fmt.Errorf("configure compatible inference auth: %w", err)
 		}
 		defer client.Close()
 		compatibleAuthorizer = client
-		l.Info("compatible inference auth enabled", slog.String("pathPrefix", pathPrefix))
+		l.Info("compatible inference auth enabled", slog.String("pathPrefix", compatiblePathPrefix))
+	} else {
+		l.Warn("compatible inference auth is not configured; compatible paths will fail closed", slog.String("pathPrefix", compatiblePathPrefix))
 	}
 
 	server, err := extproc.NewServer(l, flags.enableRedaction)

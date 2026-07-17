@@ -41,6 +41,8 @@ extProc:
     repository: docker.io/envoyproxy/ai-gateway-extproc
     # Overrides the image tag whose default is the chart appVersion.
     tag: ""
+    # Overrides the tag when set. Must include the sha256: prefix.
+    digest: ""
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
   # One of "info", "debug", "trace", "warn", "error", "fatal", "panic".
@@ -123,6 +125,8 @@ controller:
     repository: docker.io/envoyproxy/ai-gateway-controller
     # Overrides the image tag whose default is the chart appVersion.
     tag: ""
+    # Overrides the tag when set. Must include the sha256: prefix.
+    digest: ""
   imagePullPolicy: IfNotPresent
   replicaCount: 1
   imagePullSecrets: []
