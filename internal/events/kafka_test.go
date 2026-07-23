@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/IBM/sarama"
@@ -30,10 +32,11 @@ func TestKafkaPublisher_Publish(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f := &kafkaFactory{
-		producer:   mockProducer,
-		topic:      "test-topic",
-		headerKeys: map[string]bool{"x-session-id": true},
-		logger:     logger,
+		producer:            mockProducer,
+		topic:               "test-topic",
+		headerKeys:          map[string]bool{"x-session-id": true, "authorization": true},
+		bodyCaptureMaxBytes: 1024,
+		logger:              logger,
 	}
 
 	pub := f.NewPublisher("chat")
@@ -51,6 +54,9 @@ func TestKafkaPublisher_Publish(t *testing.T) {
 		"x-session-id":  "sess-abc",
 		"authorization": "Bearer secret", // should be filtered out
 	})
+	p.SetRequestBody([]byte(`{"model":"qwen3-0.6b","messages":[]}`))
+	p.SetUpstreamRequestBody([]byte(`{"model":"Qwen/Qwen3-0.6B","messages":[]}`))
+	p.ObserveResponseBody([]byte(`{"model":"Qwen/Qwen3-0.6B"}`))
 
 	tokens := &TokenInfo{InputTokens: 100, OutputTokens: 200, TotalTokens: 300}
 	p.Publish(context.Background(), true, "", tokens, 250.5, 80.0, 12.0)
@@ -84,6 +90,14 @@ func TestKafkaPublisher_Publish(t *testing.T) {
 	require.Equal(t, 12.0, event.InterTokenLatencyMs)
 	require.Equal(t, uint32(100), event.Tokens.InputTokens)
 	require.Equal(t, uint32(200), event.Tokens.OutputTokens)
+	require.Equal(t, "openai.chat_completions", event.Protocol)
+	require.Equal(t, "http_sse", event.Transport)
+	require.NotEmpty(t, event.EventID)
+	require.NotEmpty(t, event.RunID)
+	require.NotEmpty(t, event.RequestBody.SHA256)
+	require.False(t, event.RequestBody.Truncated)
+	require.NotEmpty(t, event.UpstreamRequestBody.SHA256)
+	require.NotEmpty(t, event.ResponseBody.SHA256)
 
 	// Only configured header keys should be included.
 	require.Equal(t, "sess-abc", event.Headers["x-session-id"])
@@ -119,6 +133,93 @@ func TestKafkaPublisher_PublishFailure(t *testing.T) {
 	require.False(t, event.Success)
 	require.Equal(t, "backend_error", event.ErrorType)
 	require.Nil(t, event.Tokens)
+}
+
+func TestKafkaPublisherStoresBodyBeforePublishingReference(t *testing.T) {
+	mockProducer := mocks.NewAsyncProducer(t, newTestConfig())
+	mockProducer.ExpectInputAndSucceed()
+	store := &recordingBodyStore{maxBytes: 1024}
+	f := &kafkaFactory{
+		producer: mockProducer, topic: "test-topic", headerKeys: map[string]bool{},
+		bodyCaptureMaxBytes: 1, bodyStore: store,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	publisher := f.NewPublisher("chat")
+	publisher.SetRequestID("req-s3")
+	publisher.SetRequestBody([]byte("complete request"))
+	publisher.Publish(t.Context(), true, "", nil, 1, 0, 0)
+
+	message := <-mockProducer.Successes()
+	value, err := message.Value.Encode()
+	require.NoError(t, err)
+	var event RequestEvent
+	require.NoError(t, json.Unmarshal(value, &event))
+	require.Len(t, store.objects, 1)
+	require.Equal(t, "request.bin", event.RequestBody.Object.Key)
+	require.Empty(t, event.RequestBody.ExternalStorageError)
+}
+
+type blockingBodyStore struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingBodyStore) MaxBodyBytes() int64 { return 1024 }
+
+func (s *blockingBodyStore) Put(_ context.Context, object BodyObject) (*BodyObjectReference, error) {
+	close(s.started)
+	<-s.release
+	return &BodyObjectReference{Provider: "s3", Bucket: "audit", Key: object.Kind + ".bin"}, nil
+}
+
+func TestKafkaPublisherSpoolsBeforeExternalUploadCompletes(t *testing.T) {
+	mockProducer := mocks.NewAsyncProducer(t, newTestConfig())
+	mockProducer.ExpectInputAndSucceed()
+	store := &blockingBodyStore{started: make(chan struct{}), release: make(chan struct{})}
+	spoolDir := t.TempDir()
+	f := &kafkaFactory{
+		producer: mockProducer, topic: "test-topic", headerKeys: map[string]bool{},
+		bodyCaptureMaxBytes: 1, bodyStore: store, spoolDir: spoolDir,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	publisher := f.NewPublisher("chat")
+	publisher.SetRequestID("req-pending")
+	publisher.SetRequestBody([]byte("complete request"))
+	publisher.Publish(t.Context(), true, "", nil, 1, 0, 0)
+	<-store.started
+
+	entries, err := os.ReadDir(spoolDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	spoolPath := filepath.Join(spoolDir, entries[0].Name())
+	pendingMessage, err := readSpoolRecord(spoolPath)
+	require.NoError(t, err)
+	pendingValue, err := pendingMessage.Value.Encode()
+	require.NoError(t, err)
+	var pendingEvent RequestEvent
+	require.NoError(t, json.Unmarshal(pendingValue, &pendingEvent))
+	require.Equal(t, externalStorageUploadPending, pendingEvent.RequestBody.ExternalStorageError)
+	require.Nil(t, pendingEvent.RequestBody.Object)
+
+	close(store.release)
+	message := <-mockProducer.Successes()
+	value, err := message.Value.Encode()
+	require.NoError(t, err)
+	var finalEvent RequestEvent
+	require.NoError(t, json.Unmarshal(value, &finalEvent))
+	require.Empty(t, finalEvent.RequestBody.ExternalStorageError)
+	require.Equal(t, "request.bin", finalEvent.RequestBody.Object.Key)
+	require.Equal(t, spoolPath, message.Metadata)
+}
+
+func TestKafkaFactoryRejectsInvalidCustomCA(t *testing.T) {
+	_, _, err := NewKafkaFactory(KafkaConfig{
+		Brokers: []string{"kafka:9093"}, Topic: "events", TLSEnabled: true, TLSCAPEM: "invalid",
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.ErrorContains(t, err, "configure Kafka TLS")
+	require.ErrorContains(t, err, "CA bundle contains no valid certificates")
 }
 
 // Ensure compile-time interface satisfaction.

@@ -91,6 +91,16 @@ func setHeader(headers *extprocv3.HeaderMutation, key, value string) {
 	})
 }
 
+func setHeaderOverwrite(headers *extprocv3.HeaderMutation, key, value string) {
+	headers.SetHeaders = append(headers.SetHeaders, &corev3.HeaderValueOption{
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		Header: &corev3.HeaderValue{
+			Key:      key,
+			RawValue: []byte(value),
+		},
+	})
+}
+
 // requestHost normalizes the host/authority header for matching (lowercases and strips port).
 func requestHost(headers map[string]string) string {
 	host := headers[":authority"]

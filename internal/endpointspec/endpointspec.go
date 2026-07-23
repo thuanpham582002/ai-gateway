@@ -103,6 +103,8 @@ type (
 	ImageGenerationEndpointSpec struct{}
 	// ResponsesEndpointSpec implements EndpointSpec for /v1/responses.
 	ResponsesEndpointSpec struct{}
+	// ResponsesCompactEndpointSpec implements EndpointSpec for /v1/responses/compact.
+	ResponsesCompactEndpointSpec struct{}
 	// MessagesEndpointSpec implements EndpointSpec for /v1/messages.
 	MessagesEndpointSpec struct{}
 	// RerankEndpointSpec implements EndpointSpec for /v2/rerank.
@@ -135,10 +137,7 @@ func (ChatCompletionsEndpointSpec) ParseBody(
 		// mutation, which uses this raw body, will also result in the stream_options.include_usage=true.
 		var err error
 		mutatedBody, err = sjson.SetBytesOptions(body, "stream_options.include_usage", true, &sjson.Options{
-			Optimistic: true,
-			// Note: it is safe to do in-place replacement since this route level processor is executed once per request,
-			// and the result can be safely shared among possible multiple retries.
-			ReplaceInPlace: true,
+			Optimistic: false,
 		})
 		if err != nil {
 			return "", nil, false, nil, fmt.Errorf("%w: failed to set stream_options.include_usage", internalapi.ErrMalformedRequest)
@@ -333,6 +332,40 @@ func (ResponsesEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, 
 // RedactSensitiveInfoFromRequest implements [EndpointSpec.RedactSensitiveInfoFromRequest].
 func (ResponsesEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.ResponseRequest) (redactedReq *openai.ResponseRequest, err error) {
 	// Placeholder if redaction is required in future
+	return req, nil
+}
+
+// ParseBody implements [EndpointSpec.ParseBody].
+func (ResponsesCompactEndpointSpec) ParseBody(
+	body []byte,
+	_ bool,
+) (internalapi.OriginalModel, *openai.ResponseRequest, bool, []byte, error) {
+	var openAIReq openai.ResponseRequest
+	if err := json.Unmarshal(body, &openAIReq); err != nil {
+		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v1/responses/compact: %w", internalapi.ErrMalformedRequest, err)
+	}
+	return openAIReq.Model, &openAIReq, false, nil, nil
+}
+
+// ParseMultipartBody implements [Spec.ParseMultipartBody].
+func (ResponsesCompactEndpointSpec) ParseMultipartBody([]byte, string, bool) (internalapi.OriginalModel, *openai.ResponseRequest, bool, []byte, error) {
+	return "", nil, false, nil, errMultipartNotSupported
+}
+
+// GetTranslator implements [EndpointSpec.GetTranslator].
+func (ResponsesCompactEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, modelNameOverride string) (translator.OpenAIResponsesTranslator, error) {
+	switch schema.Name {
+	case filterapi.APISchemaOpenAI:
+		return translator.NewResponsesCompactOpenAIToOpenAITranslator(schema.OpenAIPrefix(), modelNameOverride), nil
+	case filterapi.APISchemaAzureOpenAI:
+		return translator.NewResponsesCompactOpenAIToAzureOpenAITranslator(schema.Version, modelNameOverride), nil
+	default:
+		return nil, fmt.Errorf("unsupported API schema: backend=%s", schema)
+	}
+}
+
+// RedactSensitiveInfoFromRequest implements [EndpointSpec.RedactSensitiveInfoFromRequest].
+func (ResponsesCompactEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.ResponseRequest) (redactedReq *openai.ResponseRequest, err error) {
 	return req, nil
 }
 

@@ -28,6 +28,10 @@ func (noopPublisher) SetSelectedPool(string)              {}
 func (noopPublisher) SetModelNameOverride(string)         {}
 func (noopPublisher) SetStream(bool)                      {}
 func (noopPublisher) SetRequestHeaders(map[string]string) {}
+func (noopPublisher) SetRequestBody([]byte)               {}
+func (noopPublisher) SetUpstreamRequestBody([]byte)       {}
+func (noopPublisher) ObserveResponseBody([]byte)          {}
+func (noopPublisher) RunID() string                       { return "" }
 
 func (noopPublisher) Publish(context.Context, bool, string, *TokenInfo, float64, float64, float64) {
 }

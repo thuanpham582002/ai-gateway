@@ -1,0 +1,51 @@
+# Live ai-infer-factory overrides for the Kafka audit producer.
+# Keep this file synchronized with the image accepted by scripts/deploy-kafka-audit-acceptance.sh.
+controller:
+  replicaCount: 2
+  instanceLabelOverride: ai-gateway
+  image:
+    repository: 10.24.10.16:5000/ai-gateway-controller
+    tag: ai-gateway-controller-audit-dev-20260723-085244
+    digest: ""
+  imagePullPolicy: Always
+
+endpointConfig:
+  rootPrefix: /
+  openai: ""
+  cohere: /cohere
+  anthropic: /anthropic
+
+extProc:
+  image:
+    repository: 10.24.10.16:5000/ai-gateway-extproc
+    tag: audit-s3-kafka-tls-dev-20260723-104347
+    digest: ""
+  imagePullPolicy: Always
+  extraEnvVars:
+    - name: COMPATIBLE_EXT_AUTH_GRPC_ADDR
+      value: model-registry-service-dev-ext-auth.model-registry-dev.svc.cluster.local:8081
+    - name: COMPATIBLE_INFERENCE_PATH_PREFIX
+      value: /inference/
+    - name: KAFKA_BROKERS
+      value: ai-gateway-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+    - name: KAFKA_EVENT_HEADER_KEYS
+      value: x-model-id,x-model-name,x-input-price,x-output-price,x-identity-source,x-tenant-id,x-subject-id,x-subject-type,x-subject-name,x-api-key-id,x-is-free,x-credit-remaining,x-rate-limit-remaining,x-ai-eg-model,x-maas-region-id,x-maas-request-model-alias,x-maas-project-in-flight-slot,x-maas-api-key-in-flight-slot,x-maas-model-concurrency-slot,x-maas-billing-request-id,x-maas-admission-reserved,x-maas-reserved-input-tokens,x-maas-reserved-output-tokens,x-maas-reserved-cost
+    - name: KAFKA_EVENT_BODY_MAX_BYTES
+      value: "4096"
+    - name: KAFKA_EVENT_S3_BUCKET
+      value: ai-gateway-audit-dev
+    - name: KAFKA_EVENT_S3_ENDPOINT
+      value: http://minio.minio.svc.cluster.local:9000
+    - name: KAFKA_EVENT_S3_REGION
+      value: us-east-1
+    - name: KAFKA_EVENT_S3_PREFIX
+      value: request-bodies
+    - name: KAFKA_EVENT_S3_USE_PATH_STYLE
+      value: "true"
+    - name: KAFKA_EVENT_S3_MAX_BODY_BYTES
+      value: "16777216"
+    - name: KAFKA_EVENT_S3_UPLOAD_TIMEOUT
+      value: 15s
+    # This path is on the injected ExtProc UDS emptyDir and survives process restarts within a pod.
+    - name: KAFKA_EVENT_SPOOL_DIR
+      value: /etc/ai-gateway-extproc-uds/kafka-event-spool

@@ -1,0 +1,27 @@
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: GatewayConfig
+metadata:
+  name: audit-s3
+  namespace: envoy-ai-gateway-system
+spec:
+  extProc:
+    kubernetes:
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-audit-s3
+              key: access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-audit-s3
+              key: secret-access-key
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        - name: KAFKA_EVENT_S3_CA_PEM
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-audit-s3
+              key: ca.pem
+              optional: true

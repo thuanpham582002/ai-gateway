@@ -54,7 +54,7 @@ Selector labels
 */}}
 {{- define "ai-gateway-helm.controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "ai-gateway-helm.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ .Values.controller.instanceLabelOverride | default .Release.Name }}
 {{- end }}
 
 {{/*

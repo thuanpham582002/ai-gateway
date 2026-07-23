@@ -384,6 +384,29 @@ func TestResponsesEndpointSpec_GetTranslator(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestResponsesCompactEndpointSpec(t *testing.T) {
+	spec := ResponsesCompactEndpointSpec{}
+	body := []byte(`{
+		"model":"gpt-5-codex",
+		"instructions":"Keep implementation decisions",
+		"input":[{"role":"user","content":"compact this conversation"}]
+	}`)
+
+	model, parsed, stream, mutated, err := spec.ParseBody(body, false)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5-codex", model)
+	require.NotNil(t, parsed)
+	require.False(t, stream)
+	require.Nil(t, mutated)
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "override")
+	require.NoError(t, err)
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAzureOpenAI}, "override")
+	require.NoError(t, err)
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic}, "override")
+	require.ErrorContains(t, err, "unsupported API schema")
+}
+
 func TestChatCompletionsEndpointSpec_RedactSensitiveInfoFromRequest(t *testing.T) {
 	spec := ChatCompletionsEndpointSpec{}
 

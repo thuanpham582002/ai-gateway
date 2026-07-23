@@ -38,6 +38,17 @@ func NewResponsesOpenAIToAzureOpenAITranslator(apiVersion string, modelNameOverr
 	}
 }
 
+// NewResponsesCompactOpenAIToAzureOpenAITranslator creates an Azure translator for response compaction.
+func NewResponsesCompactOpenAIToAzureOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIResponsesTranslator {
+	return &openAIToAzureOpenAITranslatorV1Responses{
+		apiVersion: apiVersion,
+		openAIToOpenAITranslatorV1Responses: openAIToOpenAITranslatorV1Responses{
+			modelNameOverride: modelNameOverride,
+			path:              "/openai/responses/compact",
+		},
+	}
+}
+
 // openAIToAzureOpenAITranslatorV1ChatCompletion adapts OpenAI requests for Azure OpenAI Service.
 // Azure ignores the model field in the request body, using deployment name from the URI path instead:
 // https://learn.microsoft.com/en-us/azure/ai-foundry/openai/reference#chat-completions

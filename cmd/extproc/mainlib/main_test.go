@@ -21,15 +21,19 @@ import (
 )
 
 func Test_parseAndValidateFlags(t *testing.T) {
+	t.Setenv("KAFKA_EVENT_BODY_MAX_BYTES", "")
+	t.Setenv("KAFKA_EVENT_SPOOL_DIR", "")
 	t.Run("ok extProcFlags", func(t *testing.T) {
 		for _, tc := range []struct {
-			name            string
-			args            []string
-			configPath      string
-			addr            string
-			rootPrefix      string
-			logLevel        slog.Level
-			enableRedaction bool
+			name                   string
+			args                   []string
+			configPath             string
+			addr                   string
+			rootPrefix             string
+			logLevel               slog.Level
+			enableRedaction        bool
+			kafkaEventBodyMaxBytes int
+			kafkaEventSpoolDir     string
 		}{
 			{
 				name:            "minimal extProcFlags",
@@ -109,6 +113,17 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				enableRedaction: false,
 			},
 			{
+				name:                   "with bounded Kafka body capture",
+				args:                   []string{"-configPath", "/path/to/config.yaml", "-kafkaEventBodyMaxBytes", "262144", "-kafkaEventSpoolDir", "/var/lib/aigw/events"},
+				configPath:             "/path/to/config.yaml",
+				addr:                   ":1063",
+				rootPrefix:             "/",
+				logLevel:               slog.LevelInfo,
+				enableRedaction:        false,
+				kafkaEventBodyMaxBytes: 262144,
+				kafkaEventSpoolDir:     "/var/lib/aigw/events",
+			},
+			{
 				name: "with metrics header mapping",
 				args: []string{
 					"-configPath", "/path/to/config.yaml",
@@ -166,6 +181,8 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				require.Equal(t, tc.logLevel, flags.logLevel)
 				require.Equal(t, tc.enableRedaction, flags.enableRedaction)
 				require.Equal(t, tc.rootPrefix, flags.rootPrefix)
+				require.Equal(t, tc.kafkaEventBodyMaxBytes, flags.kafkaEventBodyMaxBytes)
+				require.Equal(t, tc.kafkaEventSpoolDir, flags.kafkaEventSpoolDir)
 			})
 		}
 	})
@@ -201,6 +218,16 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				args:          []string{"-configPath", "/path/to/config.yaml", "-spanRequestHeaderAttributes", ":session.id"},
 				expectedError: "failed to parse tracing header mapping: empty header or attribute at position 1: \":session.id\"",
 			},
+			{
+				name:          "negative Kafka body capture",
+				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaEventBodyMaxBytes", "-1"},
+				expectedError: "kafkaEventBodyMaxBytes must be non-negative",
+			},
+			{
+				name:          "spool with Kafka REST",
+				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaRESTURL", "http://kafka-rest", "-kafkaEventSpoolDir", "/events"},
+				expectedError: "kafkaEventSpoolDir is supported only by the native Kafka producer",
+			},
 		}
 
 		for _, tt := range tests {
@@ -210,6 +237,77 @@ func Test_parseAndValidateFlags(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestParseAndValidateFlagsKafkaBodyCaptureFromEnv(t *testing.T) {
+	t.Setenv("KAFKA_EVENT_BODY_MAX_BYTES", "4096")
+	t.Setenv("KAFKA_EVENT_SPOOL_DIR", "/var/lib/aigw/events")
+	flags, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.NoError(t, err)
+	require.Equal(t, 4096, flags.kafkaEventBodyMaxBytes)
+	require.Equal(t, "/var/lib/aigw/events", flags.kafkaEventSpoolDir)
+}
+
+func TestParseAndValidateFlagsKafkaCustomCAFromEnv(t *testing.T) {
+	t.Setenv("KAFKA_TLS_ENABLED", "true")
+	t.Setenv("KAFKA_TLS_CA_BUNDLE", "/etc/kafka/ca.crt")
+	t.Setenv("KAFKA_TLS_CA_PEM", "certificate")
+
+	flags, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.NoError(t, err)
+	require.True(t, flags.kafkaTLSEnabled)
+	require.Equal(t, "/etc/kafka/ca.crt", flags.kafkaTLSCABundle)
+	require.Equal(t, "certificate", flags.kafkaTLSCAPEM)
+}
+
+func TestParseAndValidateFlagsRejectsKafkaCAWithoutTLS(t *testing.T) {
+	t.Setenv("KAFKA_TLS_ENABLED", "false")
+	t.Setenv("KAFKA_TLS_CA_PEM", "certificate")
+
+	_, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.EqualError(t, err, "Kafka CA configuration requires Kafka TLS")
+}
+
+func TestParseAndValidateFlagsS3BodyStoreFromEnv(t *testing.T) {
+	t.Setenv("KAFKA_BROKERS", "kafka:9092")
+	t.Setenv("KAFKA_EVENT_S3_BUCKET", "audit-bucket")
+	t.Setenv("KAFKA_EVENT_S3_ENDPOINT", "https://seaweedfs.example.test")
+	t.Setenv("KAFKA_EVENT_S3_REGION", "local")
+	t.Setenv("KAFKA_EVENT_S3_PREFIX", "events")
+	t.Setenv("KAFKA_EVENT_S3_CA_BUNDLE", "/etc/s3/ca.pem")
+	t.Setenv("KAFKA_EVENT_S3_CA_PEM", "certificate")
+	t.Setenv("KAFKA_EVENT_S3_USE_PATH_STYLE", "true")
+	t.Setenv("KAFKA_EVENT_S3_MAX_BODY_BYTES", "1048576")
+	t.Setenv("KAFKA_EVENT_S3_UPLOAD_TIMEOUT", "30s")
+	t.Setenv("KAFKA_EVENT_S3_SERVER_SIDE_ENCRYPTION", "aws:kms")
+	t.Setenv("KAFKA_EVENT_S3_KMS_KEY_ID", "key-1")
+
+	flags, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.NoError(t, err)
+	require.Equal(t, "audit-bucket", flags.kafkaEventS3Bucket)
+	require.Equal(t, "https://seaweedfs.example.test", flags.kafkaEventS3Endpoint)
+	require.Equal(t, "local", flags.kafkaEventS3Region)
+	require.Equal(t, "events", flags.kafkaEventS3Prefix)
+	require.Equal(t, "/etc/s3/ca.pem", flags.kafkaEventS3CABundle)
+	require.Equal(t, "certificate", flags.kafkaEventS3CAPEM)
+	require.True(t, flags.kafkaEventS3UsePathStyle)
+	require.Equal(t, int64(1048576), flags.kafkaEventS3MaxBodyBytes)
+	require.Equal(t, 30*time.Second, flags.kafkaEventS3UploadTimeout)
+	require.Equal(t, "aws:kms", flags.kafkaEventS3ServerSideEncryption)
+	require.Equal(t, "key-1", flags.kafkaEventS3KMSKeyID)
+}
+
+func TestParseAndValidateFlagsRejectsInvalidS3BodyStoreEnv(t *testing.T) {
+	t.Setenv("KAFKA_BROKERS", "kafka:9092")
+	t.Setenv("KAFKA_EVENT_S3_BUCKET", "audit-bucket")
+	t.Setenv("KAFKA_EVENT_S3_USE_PATH_STYLE", "invalid")
+	t.Setenv("KAFKA_EVENT_S3_MAX_BODY_BYTES", "0")
+	t.Setenv("KAFKA_EVENT_S3_UPLOAD_TIMEOUT", "invalid")
+
+	_, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.ErrorContains(t, err, "KAFKA_EVENT_S3_USE_PATH_STYLE must be a boolean")
+	require.ErrorContains(t, err, "kafkaEventS3MaxBodyBytes must be positive")
+	require.ErrorContains(t, err, "KAFKA_EVENT_S3_UPLOAD_TIMEOUT must be a duration")
 }
 
 func TestListenAddress(t *testing.T) {

@@ -20,6 +20,10 @@ type Publisher interface {
 	SetModelNameOverride(override string)
 	SetStream(stream bool)
 	SetRequestHeaders(headers map[string]string)
+	SetRequestBody(body []byte)
+	SetUpstreamRequestBody(body []byte)
+	ObserveResponseBody(body []byte)
+	RunID() string
 	// Publish emits the accumulated event. Called once at request completion.
 	Publish(ctx context.Context, success bool, errorType string, tokens *TokenInfo, latencyMs, ttftMs, itlMs float64)
 }

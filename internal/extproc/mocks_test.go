@@ -313,8 +313,12 @@ func (m *mockEventFactory) NewPublisher(string) events.Publisher {
 
 // mockEventPublisher implements [events.Publisher] for testing.
 type mockEventPublisher struct {
-	publishCount int
-	lastSuccess  bool
+	publishCount        int
+	lastSuccess         bool
+	requestBody         []byte
+	upstreamRequestBody []byte
+	responseBody        []byte
+	runID               string
 }
 
 func (m *mockEventPublisher) SetRequestID(string)                 {}
@@ -327,6 +331,16 @@ func (m *mockEventPublisher) SetSelectedPool(string)              {}
 func (m *mockEventPublisher) SetModelNameOverride(string)         {}
 func (m *mockEventPublisher) SetStream(bool)                      {}
 func (m *mockEventPublisher) SetRequestHeaders(map[string]string) {}
+func (m *mockEventPublisher) SetRequestBody(body []byte) {
+	m.requestBody = append([]byte(nil), body...)
+}
+func (m *mockEventPublisher) SetUpstreamRequestBody(body []byte) {
+	m.upstreamRequestBody = append([]byte(nil), body...)
+}
+func (m *mockEventPublisher) ObserveResponseBody(body []byte) {
+	m.responseBody = append(m.responseBody, body...)
+}
+func (m *mockEventPublisher) RunID() string { return m.runID }
 func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, _, _ float64) {
 	m.publishCount++
 	m.lastSuccess = success

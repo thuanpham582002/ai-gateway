@@ -69,6 +69,9 @@ controller:
   logLevel: info
   nameOverride: ""
   fullnameOverride: "ai-gateway-controller"
+  # Overrides app.kubernetes.io/instance for adopting legacy releases whose
+  # immutable Deployment selector differs from the Helm release name.
+  instanceLabelOverride: ""
 
   # Address (host or host:port) of the AI Gateway rate limit service used for QuotaPolicy enforcement.
   # When no port is specified, defaults to 8081.

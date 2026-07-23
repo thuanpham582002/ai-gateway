@@ -268,13 +268,18 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 				logger:         slog.Default(),
 				tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
 			}
-			resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", true, opt)})
+			body := bodyFromModel(t, "some-model", true, opt)
+			inboundBody := append([]byte(nil), body...)
+			resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: body})
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 			require.NotNil(t, p.originalRequestBody.StreamOptions)
 			require.True(t, p.forceBodyMutation)
 			require.True(t, p.originalRequestBody.StreamOptions.IncludeUsage)
 			require.Equal(t, "some-model", p.originalModel)
+			require.Equal(t, inboundBody, p.inboundRequestBodyRaw)
+			body[0] = 'x'
+			require.Equal(t, inboundBody, p.inboundRequestBodyRaw)
 			require.Contains(t, string(p.originalRequestBodyRaw), `"stream_options":{"include_usage":true}`)
 		}
 	})
@@ -334,6 +339,28 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseHeaders(t *testin
 		mm.RequireRequestNotCompleted(t)
 		require.Nil(t, res.ModeOverride)
 	})
+	t.Run("gateway identities are returned", func(t *testing.T) {
+		inHeaders := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":status", Value: "200"}}}
+		mt := &mockTranslator{t: t, expHeaders: map[string]string{":status": "200"}}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:     mt,
+			metrics:        &mockMetrics{},
+			events:         &mockEventPublisher{runID: "run-123"},
+			requestHeaders: map[string]string{"x-request-id": "request-456"},
+			parent:         &chatCompletionProcessorRouterFilter{},
+		}
+
+		res, err := p.ProcessResponseHeaders(t.Context(), inHeaders)
+		require.NoError(t, err)
+		setHeaders := res.Response.(*extprocv3.ProcessingResponse_ResponseHeaders).ResponseHeaders.Response.HeaderMutation.SetHeaders
+		actual := make(map[string]string, len(setHeaders))
+		for _, header := range setHeaders {
+			actual[header.Header.Key] = string(header.Header.RawValue)
+			require.Equal(t, corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, header.AppendAction)
+		}
+		require.Equal(t, "request-456", actual["x-request-id"])
+		require.Equal(t, "run-123", actual["x-ai-gateway-run-id"])
+	})
 	t.Run("ok/streaming", func(t *testing.T) {
 		inHeaders := &corev3.HeaderMap{
 			Headers: []*corev3.HeaderValue{{Key: ":status", Value: "200"}, {Key: "dog", RawValue: []byte("cat")}},
@@ -366,18 +393,24 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseHeaders(t *testin
 
 func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T) {
 	t.Run("error translation", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("invalid-upstream-response"), EndOfStream: true}
 		mm := &mockMetrics{}
 		mt := &mockTranslator{t: t}
+		eventPublisher := &mockEventPublisher{}
 		p := &chatCompletionProcessorUpstreamFilter{
 			translator: mt,
 			metrics:    mm,
+			events:     eventPublisher,
 			parent:     &chatCompletionProcessorRouterFilter{},
 		}
 		mt.retErr = errors.New("test error")
-		_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{})
+		_, err := p.ProcessResponseBody(t.Context(), inBody)
 		require.ErrorContains(t, err, "test error")
 		mm.RequireRequestFailure(t)
 		require.Zero(t, mm.inputTokenCount)
+		require.Equal(t, inBody.Body, eventPublisher.responseBody)
+		require.Equal(t, 1, eventPublisher.publishCount)
+		require.False(t, eventPublisher.lastSuccess)
 	})
 	t.Run("ok", func(t *testing.T) {
 		inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
@@ -1238,6 +1271,7 @@ func Test_ProcessResponseBody_UsesActualResponseModel(t *testing.T) {
 	body := openai.ChatCompletionRequest{Model: "gpt-5-nano"}
 	raw, _ := json.Marshal(body)
 	mm := &mockMetrics{}
+	eventPublisher := &mockEventPublisher{}
 
 	// Create a mock translator that returns token usage with response model
 	// Simulating OpenAI's automatic routing where gpt-5-nano routes to gpt-5-nano-2025-08-07
@@ -1253,6 +1287,7 @@ func Test_ProcessResponseBody_UsesActualResponseModel(t *testing.T) {
 	p := &chatCompletionProcessorUpstreamFilter{
 		requestHeaders: headers,
 		metrics:        mm,
+		events:         eventPublisher,
 		translator:     mt,
 		parent: &chatCompletionProcessorRouterFilter{
 			originalRequestBody:    &body,
@@ -1292,6 +1327,11 @@ func Test_ProcessResponseBody_UsesActualResponseModel(t *testing.T) {
 	require.Equal(t, 10, mm.inputTokenCount)
 	require.Equal(t, 20, mm.outputTokenCount)
 	mm.RequireRequestSuccess(t)
+	require.JSONEq(t, string(raw), string(eventPublisher.requestBody))
+	require.Empty(t, eventPublisher.upstreamRequestBody)
+	require.Equal(t, responseBytes, eventPublisher.responseBody)
+	require.Equal(t, 1, eventPublisher.publishCount)
+	require.True(t, eventPublisher.lastSuccess)
 }
 
 func TestChatCompletionProcessorUpstreamFilter_ProcessRequestHeaders_WithBodyMutations(t *testing.T) {

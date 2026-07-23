@@ -30,6 +30,14 @@ func NewResponsesOpenAIToOpenAITranslator(prefix string, modelNameOverride inter
 	}
 }
 
+// NewResponsesCompactOpenAIToOpenAITranslator creates a pass-through translator for response compaction.
+func NewResponsesCompactOpenAIToOpenAITranslator(prefix string, modelNameOverride internalapi.ModelNameOverride) OpenAIResponsesTranslator {
+	return &openAIToOpenAITranslatorV1Responses{
+		modelNameOverride: modelNameOverride,
+		path:              path.Join("/", prefix, "responses", "compact"),
+	}
+}
+
 // openAIToOpenAITranslatorV1Responses is a passthrough translator for OpenAI Responses API.
 // May apply model overrides but otherwise preserves the OpenAI format:
 // https://platform.openai.com/docs/api-reference/responses/create

@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,22 @@ type extProcFlags struct {
 	kafkaTopic string
 	// kafkaEventHeaderKeys is a comma-separated list of request header keys to include in events.
 	kafkaEventHeaderKeys string
+	// kafkaEventBodyMaxBytes is the maximum inline bytes captured for each request/response body.
+	kafkaEventBodyMaxBytes int
+	// kafkaEventSpoolDir persists unacknowledged native Kafka events across process restarts.
+	kafkaEventSpoolDir string
+	// kafkaEventS3Bucket enables complete-body overflow storage in an S3-compatible bucket.
+	kafkaEventS3Bucket               string
+	kafkaEventS3Endpoint             string
+	kafkaEventS3Region               string
+	kafkaEventS3Prefix               string
+	kafkaEventS3CABundle             string
+	kafkaEventS3CAPEM                string
+	kafkaEventS3UsePathStyle         bool
+	kafkaEventS3MaxBodyBytes         int64
+	kafkaEventS3UploadTimeout        time.Duration
+	kafkaEventS3ServerSideEncryption string
+	kafkaEventS3KMSKeyID             string
 	// kafkaSASLUser is the SASL username for Kafka authentication.
 	kafkaSASLUser string
 	// kafkaSASLPassword is the SASL password for Kafka authentication.
@@ -76,6 +93,9 @@ type extProcFlags struct {
 	kafkaSASLMechanism string
 	// kafkaTLSEnabled enables TLS for Kafka connections.
 	kafkaTLSEnabled bool
+	// kafkaTLSCABundle and kafkaTLSCAPEM add private CAs to the Kafka TLS trust pool.
+	kafkaTLSCABundle string
+	kafkaTLSCAPEM    string
 	// kafkaRESTURL is the Kafka REST proxy URL for event publishing via HTTP.
 	kafkaRESTURL string
 }
@@ -164,11 +184,34 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 		"Kafka topic name for per-request events.")
 	fs.StringVar(&flags.kafkaEventHeaderKeys, "kafkaEventHeaderKeys", "",
 		"Comma-separated request header keys to include in Kafka events.")
+	fs.IntVar(&flags.kafkaEventBodyMaxBytes, "kafkaEventBodyMaxBytes", 0,
+		"Maximum inline bytes captured for each request/response body in Kafka events. Zero emits hashes and sizes only.")
+	fs.StringVar(&flags.kafkaEventSpoolDir, "kafkaEventSpoolDir", "",
+		"Directory for fsynced unacknowledged Kafka events. Native Kafka producer only.")
+	fs.StringVar(&flags.kafkaEventS3Bucket, "kafkaEventS3Bucket", "",
+		"S3-compatible bucket for complete bodies that exceed the Kafka inline limit. Empty disables S3 storage.")
+	fs.StringVar(&flags.kafkaEventS3Endpoint, "kafkaEventS3Endpoint", "",
+		"Optional S3-compatible endpoint URL, including scheme.")
+	fs.StringVar(&flags.kafkaEventS3Region, "kafkaEventS3Region", "us-east-1", "S3 signing region.")
+	fs.StringVar(&flags.kafkaEventS3Prefix, "kafkaEventS3Prefix", "ai-gateway-audit", "S3 object-key prefix.")
+	fs.StringVar(&flags.kafkaEventS3CABundle, "kafkaEventS3CABundle", "", "Path to a PEM CA bundle for the S3 endpoint.")
+	fs.StringVar(&flags.kafkaEventS3CAPEM, "kafkaEventS3CAPEM", "", "PEM CA certificate content for the S3 endpoint.")
+	fs.BoolVar(&flags.kafkaEventS3UsePathStyle, "kafkaEventS3UsePathStyle", false,
+		"Use path-style S3 addressing for SeaweedFS, MinIO, and similar endpoints.")
+	fs.Int64Var(&flags.kafkaEventS3MaxBodyBytes, "kafkaEventS3MaxBodyBytes", 16<<20,
+		"Maximum complete body size retained for S3 upload.")
+	fs.DurationVar(&flags.kafkaEventS3UploadTimeout, "kafkaEventS3UploadTimeout", 15*time.Second,
+		"Timeout for each S3 body upload.")
+	fs.StringVar(&flags.kafkaEventS3ServerSideEncryption, "kafkaEventS3ServerSideEncryption", "",
+		"Optional S3 server-side encryption algorithm: AES256 or aws:kms.")
+	fs.StringVar(&flags.kafkaEventS3KMSKeyID, "kafkaEventS3KMSKeyID", "", "Optional KMS key ID for aws:kms encryption.")
 	fs.StringVar(&flags.kafkaSASLUser, "kafkaSASLUser", "", "SASL username for Kafka authentication.")
 	fs.StringVar(&flags.kafkaSASLPassword, "kafkaSASLPassword", "", "SASL password for Kafka authentication.")
 	fs.StringVar(&flags.kafkaSASLMechanism, "kafkaSASLMechanism", "PLAIN",
 		"SASL mechanism for Kafka authentication (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512).")
 	fs.BoolVar(&flags.kafkaTLSEnabled, "kafkaTLSEnabled", false, "Enable TLS for Kafka connections.")
+	fs.StringVar(&flags.kafkaTLSCABundle, "kafkaTLSCABundle", "", "Path to a PEM CA bundle for Kafka TLS.")
+	fs.StringVar(&flags.kafkaTLSCAPEM, "kafkaTLSCAPEM", "", "PEM CA certificate content for Kafka TLS.")
 	fs.StringVar(&flags.kafkaRESTURL, "kafkaRESTURL", "",
 		"Kafka REST proxy URL for per-request event publishing via HTTP. Takes precedence over kafkaBrokers when both are set.")
 
@@ -188,6 +231,67 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	if flags.kafkaEventHeaderKeys == "" {
 		flags.kafkaEventHeaderKeys = os.Getenv("KAFKA_EVENT_HEADER_KEYS")
 	}
+	if flags.kafkaEventBodyMaxBytes == 0 {
+		if value := os.Getenv("KAFKA_EVENT_BODY_MAX_BYTES"); value != "" {
+			parsed, parseErr := strconv.Atoi(value)
+			if parseErr != nil {
+				errs = append(errs, fmt.Errorf("KAFKA_EVENT_BODY_MAX_BYTES must be an integer: %w", parseErr))
+			} else {
+				flags.kafkaEventBodyMaxBytes = parsed
+			}
+		}
+	}
+	if flags.kafkaEventSpoolDir == "" {
+		flags.kafkaEventSpoolDir = os.Getenv("KAFKA_EVENT_SPOOL_DIR")
+	}
+	if flags.kafkaEventS3Bucket == "" {
+		flags.kafkaEventS3Bucket = os.Getenv("KAFKA_EVENT_S3_BUCKET")
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_ENDPOINT"); flags.kafkaEventS3Endpoint == "" && value != "" {
+		flags.kafkaEventS3Endpoint = value
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_REGION"); value != "" {
+		flags.kafkaEventS3Region = value
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_PREFIX"); value != "" {
+		flags.kafkaEventS3Prefix = value
+	}
+	if flags.kafkaEventS3CABundle == "" {
+		flags.kafkaEventS3CABundle = os.Getenv("KAFKA_EVENT_S3_CA_BUNDLE")
+	}
+	if flags.kafkaEventS3CAPEM == "" {
+		flags.kafkaEventS3CAPEM = os.Getenv("KAFKA_EVENT_S3_CA_PEM")
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_USE_PATH_STYLE"); value != "" {
+		parsed, parseErr := strconv.ParseBool(value)
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("KAFKA_EVENT_S3_USE_PATH_STYLE must be a boolean: %w", parseErr))
+		} else {
+			flags.kafkaEventS3UsePathStyle = parsed
+		}
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_MAX_BODY_BYTES"); value != "" {
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("KAFKA_EVENT_S3_MAX_BODY_BYTES must be an integer: %w", parseErr))
+		} else {
+			flags.kafkaEventS3MaxBodyBytes = parsed
+		}
+	}
+	if value := os.Getenv("KAFKA_EVENT_S3_UPLOAD_TIMEOUT"); value != "" {
+		parsed, parseErr := time.ParseDuration(value)
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("KAFKA_EVENT_S3_UPLOAD_TIMEOUT must be a duration: %w", parseErr))
+		} else {
+			flags.kafkaEventS3UploadTimeout = parsed
+		}
+	}
+	if flags.kafkaEventS3ServerSideEncryption == "" {
+		flags.kafkaEventS3ServerSideEncryption = os.Getenv("KAFKA_EVENT_S3_SERVER_SIDE_ENCRYPTION")
+	}
+	if flags.kafkaEventS3KMSKeyID == "" {
+		flags.kafkaEventS3KMSKeyID = os.Getenv("KAFKA_EVENT_S3_KMS_KEY_ID")
+	}
 	if flags.kafkaSASLUser == "" {
 		flags.kafkaSASLUser = os.Getenv("KAFKA_SASL_USER")
 	}
@@ -201,6 +305,12 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	}
 	if !flags.kafkaTLSEnabled {
 		flags.kafkaTLSEnabled = os.Getenv("KAFKA_TLS_ENABLED") == "true"
+	}
+	if flags.kafkaTLSCABundle == "" {
+		flags.kafkaTLSCABundle = os.Getenv("KAFKA_TLS_CA_BUNDLE")
+	}
+	if flags.kafkaTLSCAPEM == "" {
+		flags.kafkaTLSCAPEM = os.Getenv("KAFKA_TLS_CA_PEM")
 	}
 	if flags.kafkaRESTURL == "" {
 		flags.kafkaRESTURL = os.Getenv("KAFKA_REST_URL")
@@ -235,6 +345,26 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	if flags.endpointPrefixes != "" {
 		if _, err := internalapi.ParseEndpointPrefixes(flags.endpointPrefixes); err != nil {
 			errs = append(errs, fmt.Errorf("failed to parse endpoint prefixes: %w", err))
+		}
+	}
+	if flags.kafkaEventBodyMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf("kafkaEventBodyMaxBytes must be non-negative"))
+	}
+	if flags.kafkaRESTURL != "" && flags.kafkaEventSpoolDir != "" {
+		errs = append(errs, fmt.Errorf("kafkaEventSpoolDir is supported only by the native Kafka producer"))
+	}
+	if !flags.kafkaTLSEnabled && (flags.kafkaTLSCABundle != "" || flags.kafkaTLSCAPEM != "") {
+		errs = append(errs, fmt.Errorf("Kafka CA configuration requires Kafka TLS"))
+	}
+	if flags.kafkaEventS3Bucket != "" {
+		if flags.kafkaBrokers == "" && flags.kafkaRESTURL == "" {
+			errs = append(errs, fmt.Errorf("S3 body storage requires Kafka event publishing"))
+		}
+		if flags.kafkaEventS3MaxBodyBytes <= 0 {
+			errs = append(errs, fmt.Errorf("kafkaEventS3MaxBodyBytes must be positive when S3 storage is enabled"))
+		}
+		if flags.kafkaEventS3UploadTimeout <= 0 {
+			errs = append(errs, fmt.Errorf("kafkaEventS3UploadTimeout must be positive when S3 storage is enabled"))
 		}
 	}
 
@@ -354,14 +484,39 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	// Create event publisher factory for per-request events.
 	var eventFactory events.Factory
 	var eventShutdown func()
+	bodyStoreShutdown := func() {}
 	var headerKeys []string
 	if flags.kafkaEventHeaderKeys != "" {
 		headerKeys = strings.Split(flags.kafkaEventHeaderKeys, ",")
 	}
+	var bodyStore events.BodyStore
+	if flags.kafkaEventS3Bucket != "" {
+		bodyStore, bodyStoreShutdown, err = events.NewS3BodyStore(ctx, events.S3BodyStoreConfig{
+			Endpoint:             flags.kafkaEventS3Endpoint,
+			Bucket:               flags.kafkaEventS3Bucket,
+			Region:               flags.kafkaEventS3Region,
+			Prefix:               flags.kafkaEventS3Prefix,
+			CABundlePath:         flags.kafkaEventS3CABundle,
+			CAPEM:                flags.kafkaEventS3CAPEM,
+			UsePathStyle:         flags.kafkaEventS3UsePathStyle,
+			MaxBodyBytes:         flags.kafkaEventS3MaxBodyBytes,
+			UploadTimeout:        flags.kafkaEventS3UploadTimeout,
+			ServerSideEncryption: flags.kafkaEventS3ServerSideEncryption,
+			KMSKeyID:             flags.kafkaEventS3KMSKeyID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create S3 event body store: %w", err)
+		}
+		l.Info("S3-compatible event body storage enabled",
+			slog.String("bucket", flags.kafkaEventS3Bucket), slog.String("endpoint", flags.kafkaEventS3Endpoint),
+			slog.Int64("maxBodyBytes", flags.kafkaEventS3MaxBodyBytes))
+	}
 	if flags.kafkaRESTURL != "" {
 		cfg := events.KafkaRESTConfig{
-			URL:   flags.kafkaRESTURL,
-			Topic: flags.kafkaTopic,
+			URL:                 flags.kafkaRESTURL,
+			Topic:               flags.kafkaTopic,
+			BodyCaptureMaxBytes: flags.kafkaEventBodyMaxBytes,
+			BodyStore:           bodyStore,
 		}
 		eventFactory, eventShutdown, err = events.NewKafkaRESTFactory(cfg, headerKeys, l)
 		if err != nil {
@@ -371,12 +526,17 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	} else if flags.kafkaBrokers != "" {
 		brokers := strings.Split(flags.kafkaBrokers, ",")
 		cfg := events.KafkaConfig{
-			Brokers:       brokers,
-			Topic:         flags.kafkaTopic,
-			SASLUser:      flags.kafkaSASLUser,
-			SASLPassword:  flags.kafkaSASLPassword,
-			SASLMechanism: flags.kafkaSASLMechanism,
-			TLSEnabled:    flags.kafkaTLSEnabled,
+			Brokers:             brokers,
+			Topic:               flags.kafkaTopic,
+			SASLUser:            flags.kafkaSASLUser,
+			SASLPassword:        flags.kafkaSASLPassword,
+			SASLMechanism:       flags.kafkaSASLMechanism,
+			TLSEnabled:          flags.kafkaTLSEnabled,
+			TLSCABundle:         flags.kafkaTLSCABundle,
+			TLSCAPEM:            flags.kafkaTLSCAPEM,
+			BodyCaptureMaxBytes: flags.kafkaEventBodyMaxBytes,
+			SpoolDir:            flags.kafkaEventSpoolDir,
+			BodyStore:           bodyStore,
 		}
 		eventFactory, eventShutdown, err = events.NewKafkaFactory(cfg, headerKeys, l)
 		if err != nil {
@@ -414,8 +574,10 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		completionMetricsFactory, eventFactory, "completion", tracing.CompletionTracer(), endpointspec.CompletionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/embeddings"), extproc.NewFactory(
 		embeddingsMetricsFactory, eventFactory, "embeddings", tracing.EmbeddingsTracer(), endpointspec.EmbeddingsEndpointSpec{}))
-	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses"), extproc.NewFactory(
-		responsesMetricsFactory, eventFactory, "responses", tracing.ResponsesTracer(), endpointspec.ResponsesEndpointSpec{}))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses"), extproc.NewFactoryWithCompatibleAuth(
+		responsesMetricsFactory, eventFactory, "responses", tracing.ResponsesTracer(), endpointspec.ResponsesEndpointSpec{}, compatibleAuthorizer))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses/compact"), extproc.NewFactoryWithCompatibleAuth(
+		responsesMetricsFactory, eventFactory, "responses_compact", tracing.ResponsesTracer(), endpointspec.ResponsesCompactEndpointSpec{}, compatibleAuthorizer))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/audio/speech"), extproc.NewFactory(
 		speechMetricsFactory, eventFactory, "speech", tracing.SpeechTracer(), endpointspec.SpeechEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/audio/transcriptions"), extproc.NewFactory(
@@ -427,8 +589,8 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Cohere, "/v2/rerank"), extproc.NewFactory(
 		rerankMetricsFactory, eventFactory, "rerank", tracing.RerankTracer(), endpointspec.RerankEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/models"), extproc.NewModelsProcessor)
-	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Anthropic, "/v1/messages"), extproc.NewFactory(
-		messagesMetricsFactory, eventFactory, "messages", tracing.MessageTracer(), endpointspec.MessagesEndpointSpec{}))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Anthropic, "/v1/messages"), extproc.NewFactoryWithCompatibleAuth(
+		messagesMetricsFactory, eventFactory, "messages", tracing.MessageTracer(), endpointspec.MessagesEndpointSpec{}, compatibleAuthorizer))
 
 	// Create and register gRPC server with ExternalProcessorServer (the service Envoy calls).
 	if err = filterapi.StartConfigWatcher(ctx, flags.configPath, server, l, time.Second*5); err != nil {
@@ -507,6 +669,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 			l.Error("Failed to shutdown metrics gracefully", "error", err)
 		}
 		eventShutdown()
+		bodyStoreShutdown()
 		if mcpServer != nil {
 			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
 				l.Error("Failed to shutdown mcp proxy server gracefully", "error", err)

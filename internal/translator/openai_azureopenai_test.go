@@ -104,6 +104,18 @@ func TestOpenAIToAzureOpenAITranslatorV1Responses_RequestBody(t *testing.T) {
 	})
 }
 
+func TestOpenAIToAzureOpenAITranslatorV1ResponsesCompact_RequestBody(t *testing.T) {
+	translator := NewResponsesCompactOpenAIToAzureOpenAITranslator("2025-04-01-preview", "served-model")
+	headers, body, err := translator.RequestBody(
+		[]byte(`{"model":"alias","input":"compact"}`),
+		&openai.ResponseRequest{Model: "alias"},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "/openai/responses/compact?api-version=2025-04-01-preview", headers[0].Value())
+	require.JSONEq(t, `{"model":"served-model","input":"compact"}`, string(body))
+}
+
 func TestAppendAzureOpenAIAPIVersion(t *testing.T) {
 	require.Equal(t, "/custom/path?foo=bar&api-version=some-version", appendAzureOpenAIAPIVersion("/custom/path?foo=bar", "some-version"))
 	require.Equal(t, "/custom/path?api-version=some-version", appendAzureOpenAIAPIVersion("/custom/path?", "some-version"))

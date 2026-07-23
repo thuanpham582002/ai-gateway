@@ -45,6 +45,20 @@ func Test_NewResponsesOpenAIToOpenAITranslator(t *testing.T) {
 	}
 }
 
+func TestNewResponsesCompactOpenAIToOpenAITranslator(t *testing.T) {
+	translator := NewResponsesCompactOpenAIToOpenAITranslator("v1", "served-model").(*openAIToOpenAITranslatorV1Responses)
+	require.Equal(t, "/v1/responses/compact", translator.path)
+
+	headers, body, err := translator.RequestBody(
+		[]byte(`{"model":"alias","input":"compact"}`),
+		&openai.ResponseRequest{Model: "alias"},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "/v1/responses/compact", headers[0].Value())
+	require.JSONEq(t, `{"model":"served-model","input":"compact"}`, string(body))
+}
+
 func TestResponsesOpenAIToOpenAITranslator_RequestBody(t *testing.T) {
 	t.Run("basic request without override", func(t *testing.T) {
 		translator := NewResponsesOpenAIToOpenAITranslator("v1", "").(*openAIToOpenAITranslatorV1Responses)

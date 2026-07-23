@@ -122,6 +122,7 @@ type (
 		// when the request is retried.
 		originalRequestBody    *ReqT
 		originalRequestBodyRaw []byte
+		inboundRequestBodyRaw  []byte
 		originalModel          internalapi.OriginalModel
 		forceBodyMutation      bool
 		// tracer is the tracer used for requests.
@@ -253,6 +254,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		mutatedOriginalBody []byte
 		err                 error
 	)
+	r.inboundRequestBodyRaw = append([]byte(nil), rawBody.Body...)
 	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0
 	contentType := r.requestHeaders["content-type"]
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
@@ -411,11 +413,16 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 
 	// Set up event publisher with request info.
 	if u.events != nil {
+		inboundBody := u.parent.inboundRequestBodyRaw
+		if inboundBody == nil {
+			inboundBody = u.parent.originalRequestBodyRaw
+		}
 		u.events.SetRequestID(u.requestHeaders["x-request-id"])
 		u.events.SetOriginalModel(u.parent.originalModel)
 		u.events.SetRequestModel(reqModel)
 		u.events.SetStream(u.parent.stream)
 		u.events.SetRequestHeaders(u.requestHeaders)
+		u.events.SetRequestBody(inboundBody)
 	}
 
 	// We force the body mutation in the following cases:
@@ -511,6 +518,13 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		dm = buildContentLengthDynamicMetadataOnRequest(len(bm))
 	}
 	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
+	if u.events != nil {
+		upstreamBody := u.parent.originalRequestBodyRaw
+		if body := bodyMutation.GetBody(); body != nil {
+			upstreamBody = body
+		}
+		u.events.SetUpstreamRequestBody(upstreamBody)
+	}
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -555,6 +569,14 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		mode = &extprocv3http.ProcessingMode{ResponseBodyMode: extprocv3http.ProcessingMode_STREAMED}
 	}
 	headerMutation, _ := mutationsFromTranslationResult(newHeaders, nil)
+	if requestID := u.requestHeaders["x-request-id"]; requestID != "" {
+		setHeaderOverwrite(headerMutation, "x-request-id", requestID)
+	}
+	if u.events != nil {
+		if runID := u.events.RunID(); runID != "" {
+			setHeaderOverwrite(headerMutation, "x-ai-gateway-run-id", runID)
+		}
+	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 		ResponseHeaders: &extprocv3.HeadersResponse{
 			Response: &extprocv3.CommonResponse{HeaderMutation: headerMutation},
@@ -565,8 +587,12 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 // ProcessResponseBody implements [Processor.ProcessResponseBody].
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
 	var errorType metrics.GenAIErrorType
+	responseBodyObserved := false
 	defer func() {
 		if err != nil {
+			if u.events != nil && !responseBodyObserved {
+				u.events.ObserveResponseBody(body.Body)
+			}
 			// Transform errors from response processing
 			u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorTransformError, u.requestHeaders)
 			u.publishEvent(ctx, false, string(metrics.GenAIErrorTransformError), nil)
@@ -606,6 +632,14 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			return nil, fmt.Errorf("failed to transform response error: %w", err)
 		}
 		headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
+		if u.events != nil {
+			responseBody := body.Body
+			if transformed := bodyMutation.GetBody(); transformed != nil {
+				responseBody = transformed
+			}
+			u.events.ObserveResponseBody(responseBody)
+			responseBodyObserved = true
+		}
 		if u.parent.span != nil {
 			b := bodyMutation.GetBody()
 			if b == nil {
@@ -632,6 +666,14 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
 	headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
+	if u.events != nil {
+		responseBody := body.Body
+		if transformed := bodyMutation.GetBody(); transformed != nil {
+			responseBody = transformed
+		}
+		u.events.ObserveResponseBody(responseBody)
+		responseBodyObserved = true
+	}
 
 	// Remove content-encoding header if original body encoded but was mutated in the processor.
 	headerMutation = removeContentEncodingIfNeeded(headerMutation, bodyMutation, decodingResult.isEncoded)
