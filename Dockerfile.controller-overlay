@@ -1,0 +1,7 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY --chown=65532:65532 ./out/controller-linux-amd64 /app
+
+USER 65532:65532
+ENTRYPOINT ["/app"]

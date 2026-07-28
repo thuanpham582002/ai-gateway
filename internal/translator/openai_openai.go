@@ -60,9 +60,22 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) RequestBody(original []byte, 
 	}
 	// Store the request model to use as fallback for response model
 	o.requestModel = req.Model
+	// Some OpenAI-compatible clients retain tool_choice while issuing internal
+	// summarization requests without a tools array. vLLM rejects that otherwise
+	// harmless combination before inference, so remove the stale policy.
+	if len(req.Tools) == 0 && req.ToolChoice != nil {
+		newBody, err = sjson.DeleteBytes(original, "tool_choice")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to remove tool choice without tools: %w", err)
+		}
+	}
 	if o.modelNameOverride != "" {
 		// If modelName is set we override the model to be used for the request.
-		newBody, err = sjson.SetBytesOptions(original, "model", o.modelNameOverride, sjsonOptions)
+		mutationBase := original
+		if len(newBody) > 0 {
+			mutationBase = newBody
+		}
+		newBody, err = sjson.SetBytesOptions(mutationBase, "model", o.modelNameOverride, sjsonOptions)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to set model name: %w", err)
 		}

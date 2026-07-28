@@ -444,6 +444,11 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 							"namespace", backendNamespace)
 						continue
 					}
+					// BackendRef mutations are route-owned and are valid for an
+					// InferencePool too. In particular, model-registry uses a
+					// trusted internal header to convey immutable shape policy.
+					b.HeaderMutation = headerMutationToFilterAPI(backendRef.HeaderMutation)
+					b.BodyMutation = bodyMutationToFilterAPI(backendRef.BodyMutation)
 				} else {
 					var backendObj *aigv1b1.AIServiceBackend
 					backendObj, bsp, err = c.backendWithMaybeBSP(ctx, backendNamespace, backendRef.Name)

@@ -1004,6 +1004,24 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[4].Name)
 	})
 
+	t.Run("listener deduplicates repeated inference pools across reconciles", func(t *testing.T) {
+		listener := createListenerWithHCM("test-listener", []*httpconnectionmanagerv3.HttpFilter{
+			{Name: "envoy.filters.http.router"},
+		})
+		pool := createInferencePool("test-pool", "test-ns")
+		pools := []*gwaiev1.InferencePool{pool, pool, createInferencePool("test-pool", "test-ns")}
+
+		s.patchListenerWithInferencePoolFilters(listener, pools)
+		s.patchListenerWithInferencePoolFilters(listener, pools)
+
+		hcm := &httpconnectionmanagerv3.HttpConnectionManager{}
+		err := listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm)
+		require.NoError(t, err)
+		require.Len(t, hcm.HttpFilters, 3)
+		require.Equal(t, httpFilterNameForInferencePool(pool), hcm.HttpFilters[0].Name)
+		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[2].Name)
+	})
+
 	t.Run("listener with both filter chains and default filter chain", func(t *testing.T) {
 		hcm := &httpconnectionmanagerv3.HttpConnectionManager{
 			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
@@ -1720,7 +1738,7 @@ func TestInferencePoolAnnotationHelpers(t *testing.T) {
 				},
 			}
 			mode := getProcessingBodyModeStringFromAnnotations(pool)
-			require.Equal(t, "invalid", mode) // Returns the raw value
+			require.Equal(t, "duplex", mode)
 		})
 	})
 

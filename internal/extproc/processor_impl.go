@@ -152,6 +152,7 @@ type (
 		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
 		modelNameOverride  internalapi.ModelNameOverride
 		headerMutator      *headermutator.HeaderMutator
+		reasoningPolicy    string
 		bodyMutator        *bodymutator.BodyMutator
 		backendName        string
 		routeName          string
@@ -287,6 +288,32 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		}
 		if matched && decision.Model != "" {
 			authorizedModel = decision.Model
+		}
+	}
+
+	// Validate shape-owned reasoning policy before InferencePool endpoint
+	// selection. Otherwise a deterministic client error can be hidden behind an
+	// unavailable or slow EPP/worker.
+	policy, policyErr := reasoningPolicyForModel(r.config, authorizedModel)
+	if policyErr != nil {
+		return nil, fmt.Errorf("cannot resolve reasoning policy: %w", policyErr)
+	}
+	if policy != "" {
+		policyBody := rawBody.Body
+		if mutatedOriginalBody != nil {
+			policyBody = mutatedOriginalBody
+		}
+		normalized, changed, normalizeErr := normalizeReasoningBudget(policy, policyBody)
+		if normalizeErr != nil {
+			r.logger.Info("rejecting invalid reasoning policy request", slog.String("error", normalizeErr.Error()))
+			return createUserFacingErrorResponse(422, "UnprocessableEntity", normalizeErr.Error()), nil
+		}
+		if changed {
+			originalModel, body, stream, _, err = r.eh.ParseBody(normalized, costConfigured)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse normalized reasoning request: %w", err)
+			}
+			mutatedOriginalBody = normalized
 		}
 	}
 
@@ -442,14 +469,51 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		}
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
+	// Resolve backend-owned header mutations before processing the body. The
+	// reasoning policy is injected by the selected route/backend, so it is not
+	// present in the inbound request headers and must never be trusted from the
+	// client itself.
+	var routeHeaderSets []internalapi.Header
+	var routeHeaderRemoves []string
+	if h := u.headerMutator; h != nil {
+		routeHeaderSets, routeHeaderRemoves = h.Mutate(u.requestHeaders, u.onRetry())
+	}
+	policyBody := newBody
+	if policyBody == nil {
+		policyBody = u.parent.originalRequestBodyRaw
+	}
+	if u.reasoningPolicy != "" {
+		u.logger.Debug("normalizing reasoning request",
+			slog.Bool("has_thinking_token_budget", bytes.Contains(u.parent.originalRequestBodyRaw, []byte(`"thinking_token_budget"`))),
+			slog.Bool("has_nvext_budget", bytes.Contains(u.parent.originalRequestBodyRaw, []byte(`"max_thinking_tokens"`))),
+			slog.Bool("translated_body", newBody != nil))
+	}
+	if normalized, changed, policyErr := normalizeReasoningBudgetAfterTranslation(
+		u.reasoningPolicy, u.parent.originalRequestBodyRaw, policyBody,
+	); policyErr != nil {
+		u.logger.Info("rejecting invalid reasoning policy request", slog.String("error", policyErr.Error()))
+		u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorInvalidRequest, u.requestHeaders)
+		u.publishEvent(ctx, false, string(metrics.GenAIErrorInvalidRequest), nil)
+		return createUserFacingErrorResponse(422, "UnprocessableEntity", policyErr.Error()), nil
+	} else if changed {
+		newBody = normalized
+		forceBodyMutation = true
+	}
 
 	headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
+	// This control-plane header is consumed locally and must never reach a model
+	// backend, including when an untrusted client supplied it directly.
+	if u.requestHeaders[reasoningPolicyHeader] != "" || u.reasoningPolicy != "" {
+		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, reasoningPolicyHeader)
+	}
 
 	// Apply header mutations from the route and also restore original headers on retry.
-	if h := u.headerMutator; h != nil {
-		sets, removes := u.headerMutator.Mutate(u.requestHeaders, u.onRetry())
-		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, removes...)
-		for _, hdr := range sets {
+	if u.headerMutator != nil {
+		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, routeHeaderRemoves...)
+		for _, hdr := range routeHeaderSets {
+			if strings.EqualFold(hdr.Key(), reasoningPolicyHeader) {
+				continue
+			}
 			headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
 				AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 				Header: &corev3.HeaderValue{
@@ -780,6 +844,18 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 		}
 	}
 	u.handler = backend.Handler
+	u.reasoningPolicy = ""
+	if mutation := backend.Backend.HeaderMutation; mutation != nil {
+		for _, hdr := range mutation.Set {
+			if strings.EqualFold(hdr.Name, reasoningPolicyHeader) {
+				u.reasoningPolicy = hdr.Value
+				break
+			}
+		}
+	}
+	if u.reasoningPolicy != "" {
+		u.logger.Debug("selected backend reasoning policy", slog.String("backend", backend.Backend.Name))
+	}
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
 	u.bodyMutator = bodymutator.NewBodyMutator(backend.Backend.BodyMutation, rp.originalRequestBodyRaw)
 	// Header-derived labels/CEL must be able to see the overridden request model.

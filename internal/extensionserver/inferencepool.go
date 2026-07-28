@@ -286,8 +286,11 @@ func buildInferencePoolHTTPFilter(pool *gwaiev1.InferencePool) (*httpconnectionm
 
 // buildHTTPFilterForInferencePool returns the HTTP filter for the given InferencePool.
 func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.ExternalProcessor {
-	// Read processing body mode from annotations, default to "duplex" (FULL_DUPLEX_STREAMED)
-	processingBodyMode := getProcessingBodyModeFromAnnotations(pool)
+	// EPP selects a worker after inspecting the request body. Buffering the
+	// request ensures its routing header mutations are applied before Envoy
+	// starts the upstream request. Responses remain streamed so token delivery
+	// and EPP response accounting are not delayed until end-of-stream.
+	requestBodyMode := getProcessingBodyModeFromAnnotations(pool)
 
 	// Read allow mode override from annotations, default to false
 	allowModeOverride := getAllowModeOverrideFromAnnotations(pool)
@@ -303,9 +306,9 @@ func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.Ext
 		},
 		ProcessingMode: &extprocv3.ProcessingMode{
 			RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
-			RequestBodyMode:     processingBodyMode,
+			RequestBodyMode:     requestBodyMode,
 			RequestTrailerMode:  extprocv3.ProcessingMode_SEND,
-			ResponseBodyMode:    processingBodyMode,
+			ResponseBodyMode:    requestBodyMode,
 			ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
 			ResponseTrailerMode: extprocv3.ProcessingMode_SEND,
 		},
@@ -320,12 +323,12 @@ func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.Ext
 func getProcessingBodyModeFromAnnotations(pool *gwaiev1.InferencePool) extprocv3.ProcessingMode_BodySendMode {
 	annotations := pool.GetAnnotations()
 	if annotations == nil {
-		return extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED // default to duplex
+		return extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED
 	}
 
 	mode, exists := annotations[processingBodyModeAnnotation]
 	if !exists {
-		return extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED // default to duplex
+		return extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED
 	}
 
 	switch mode {
@@ -359,15 +362,20 @@ func getAllowModeOverrideFromAnnotations(pool *gwaiev1.InferencePool) bool {
 func getProcessingBodyModeStringFromAnnotations(pool *gwaiev1.InferencePool) string {
 	annotations := pool.GetAnnotations()
 	if annotations == nil {
-		return "duplex" // default to duplex
+		return "duplex"
 	}
 
 	mode, exists := annotations[processingBodyModeAnnotation]
 	if !exists {
-		return "duplex" // default to duplex
+		return "duplex"
 	}
 
-	return mode
+	switch mode {
+	case "buffered", "duplex":
+		return mode
+	default:
+		return "duplex"
+	}
 }
 
 // getAllowModeOverrideStringFromAnnotations reads the allow mode override setting from InferencePool annotations.

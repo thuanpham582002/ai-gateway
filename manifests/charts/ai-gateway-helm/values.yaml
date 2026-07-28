@@ -69,6 +69,7 @@ controller:
   logLevel: info
   nameOverride: ""
   fullnameOverride: "ai-gateway-controller"
+  strategy: {}
   # Overrides app.kubernetes.io/instance for adopting legacy releases whose
   # immutable Deployment selector differs from the Helm release name.
   instanceLabelOverride: ""

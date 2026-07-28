@@ -208,6 +208,22 @@ func TestOpenAIToOpenAITranslatorV1ChatCompletionRequestBody(t *testing.T) {
 		require.Equal(t, contentLengthHeaderName, hm[1].Key())
 		require.Equal(t, strconv.Itoa(len(body)), hm[1].Value())
 	})
+	t.Run("tool choice without tools is removed", func(t *testing.T) {
+		originalReq := &openai.ChatCompletionRequest{
+			Model:      "foo-bar-ai",
+			ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "auto"},
+		}
+		original := []byte(`{"model":"foo-bar-ai","messages":[{"role":"user","content":"summarize"}],"tool_choice":"auto"}`)
+		o := NewChatCompletionOpenAIToOpenAITranslator("foo/v1", "backend-model").(*openAIToOpenAITranslatorV1ChatCompletion)
+		hm, body, err := o.RequestBody(original, originalReq, false)
+		require.NoError(t, err)
+		require.NotEmpty(t, body)
+		require.Len(t, hm, 2)
+		var newReq openai.ChatCompletionRequest
+		require.NoError(t, json.Unmarshal(body, &newReq))
+		require.Equal(t, "backend-model", newReq.Model)
+		require.Nil(t, newReq.ToolChoice)
+	})
 }
 
 func TestOpenAIToOpenAITranslator_ResponseError(t *testing.T) {

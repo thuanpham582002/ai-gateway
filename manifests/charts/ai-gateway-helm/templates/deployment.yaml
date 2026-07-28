@@ -12,6 +12,10 @@ metadata:
     {{- include "ai-gateway-helm.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  {{- with .Values.controller.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "ai-gateway-helm.controller.selectorLabels" . | nindent 6 }}
@@ -39,7 +43,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.controller.securityContext | nindent 12 }}
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "ai-gateway-helm.image" (dict "image" .Values.controller.image "appVersion" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           ports:
             {{- range .Values.controller.service.ports }}
@@ -47,7 +51,7 @@ spec:
             {{- end }}
           args:
             - -logLevel={{ .Values.controller.logLevel }}
-            - --extProcImage={{ .Values.extProc.image.repository }}:{{ .Values.extProc.image.tag | default .Chart.AppVersion }}
+            - --extProcImage={{ include "ai-gateway-helm.image" (dict "image" .Values.extProc.image "appVersion" .Chart.AppVersion) }}
             - --extProcImagePullPolicy={{ .Values.extProc.imagePullPolicy }}
             - --extProcLogLevel={{ .Values.extProc.logLevel }}
             - --envoyGatewayNamespace={{ .Values.envoyGateway.namespace }}

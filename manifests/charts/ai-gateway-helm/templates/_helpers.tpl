@@ -38,6 +38,17 @@ Create chart name and version as used by the chart label.
 {{- end }}
 
 {{/*
+Build a tag- or digest-based image reference.
+*/}}
+{{- define "ai-gateway-helm.image" -}}
+{{- if .image.digest -}}
+{{- printf "%s@%s" .image.repository .image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .image.repository (default .appVersion .image.tag) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Common labels
 */}}
 {{- define "ai-gateway-helm.labels" -}}

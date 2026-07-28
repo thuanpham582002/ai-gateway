@@ -561,13 +561,13 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			continue
 		}
 		var poolFilters []*httpconnectionmanagerv3.HttpFilter
+		knownPoolFilters := make(map[string]struct{}, len(httpConManager.HttpFilters))
+		for _, filter := range httpConManager.HttpFilters {
+			knownPoolFilters[filter.Name] = struct{}{}
+		}
 		for _, pool := range inferencePools {
-			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
-			if searchErr != nil {
-				s.log.Error(searchErr, "failed to find an inference pool ext proc filter")
-				continue
-			}
-			if baIndex == -1 {
+			filterName := httpFilterNameForInferencePool(pool)
+			if _, exists := knownPoolFilters[filterName]; !exists {
 				s.log.Info("adding inference pool ext proc filter", "pool", pool.Name)
 				var eppExtProc *httpconnectionmanagerv3.HttpFilter
 				eppExtProc, err = buildInferencePoolHTTPFilter(pool)
@@ -586,6 +586,7 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 					continue
 				}
 				poolFilters = append(poolFilters, headerCopyFilter)
+				knownPoolFilters[filterName] = struct{}{}
 				s.log.Info("added header copy filter for pool", "pool", pool.Name,
 					"target_header", endpointPickerHeaderForPool(pool))
 			}

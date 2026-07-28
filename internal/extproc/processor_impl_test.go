@@ -804,6 +804,38 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 	}
 }
 
+func Test_chatCompletionProcessorUpstreamFilter_UsesRouteReasoningPolicyBeforeBodyProcessing(t *testing.T) {
+	policy := `{"enabled":true,"defaultTokenBudget":32768,"maxTokenBudget":32768,"answerReserveTokens":4096,"transport":"dynamo_nvext"}`
+	raw := []byte(`{"model":"glm-5.2","thinking_token_budget":4096,"nvext":{"max_thinking_tokens":8192}}`)
+	body := openai.ChatCompletionRequest{Model: "glm-5.2"}
+	headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "glm-5.2"}
+	p := &chatCompletionProcessorUpstreamFilter{
+		parent: &chatCompletionProcessorRouterFilter{
+			config:                 &filterapi.RuntimeConfig{},
+			logger:                 slog.Default(),
+			originalRequestBodyRaw: raw,
+			originalRequestBody:    &body,
+			originalModel:          "glm-5.2",
+		},
+		requestHeaders:  headers,
+		metrics:         &mockMetrics{},
+		reasoningPolicy: policy,
+		logger:          slog.Default(),
+		translator: &mockTranslator{
+			t:               t,
+			expRequestBody:  &body,
+			retBodyMutation: []byte(`{"model":"GLM-5.2 FP8 HLA Dynamo 1.3.0"}`),
+		},
+	}
+
+	resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+	require.NoError(t, err)
+	immediate := resp.GetImmediateResponse()
+	require.NotNil(t, immediate)
+	require.Equal(t, typev3.StatusCode(422), immediate.Status.Code)
+	require.Contains(t, string(immediate.Body), "thinking_token_budget and nvext.max_thinking_tokens conflict")
+}
+
 func Test_messagesProcessorUpstreamFilter_ProcessRequestHeaders_AWSAnthropicBetaHeader(t *testing.T) {
 	body := anthropicschema.MessagesRequest{
 		Model:     "anthropic.claude-3-sonnet-20240229-v1:0",

@@ -147,7 +147,6 @@ func TestBuildHTTPFilterForInferencePool_Defaults(t *testing.T) {
 
 	filter := buildHTTPFilterForInferencePool(pool)
 	assert.NotNil(t, filter)
-	// Expect duplex by default
 	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
 	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
 	assert.False(t, filter.AllowModeOverride)
