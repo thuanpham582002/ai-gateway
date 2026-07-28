@@ -110,3 +110,43 @@ func TestNormalizeReasoningBudgetAfterTranslationPreservesClientExtensions(t *te
 		t.Fatalf("unexpected translated body: %s", got)
 	}
 }
+
+func TestNormalizeReasoningBudgetOverridesCompletionLimitWhenShapeRequiresIt(t *testing.T) {
+	policy := `{"enabled":true,"defaultTokenBudget":32768,"maxTokenBudget":32768,"answerReserveTokens":4096,"overrideMaxCompletionTokens":true,"maxCompletionTokens":65536,"transport":"dynamo_nvext"}`
+	source := []byte(`{"model":"glm-5.2","max_tokens":145}`)
+	target := []byte(`{"model":"GLM-5.2 FP8 HLA Dynamo 1.3.0","max_tokens":145}`)
+
+	got, changed, err := normalizeReasoningBudgetAfterTranslation(policy, source, target)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := decoded["max_tokens"]; exists {
+		t.Fatalf("legacy max_tokens was not removed: %s", got)
+	}
+	if decoded["max_completion_tokens"] != float64(65536) {
+		t.Fatalf("completion limit was not overridden: %s", got)
+	}
+	nvext := decoded["nvext"].(map[string]any)
+	if nvext["max_thinking_tokens"] != float64(32768) {
+		t.Fatalf("reasoning budget used the client limit instead of the shape override: %s", got)
+	}
+}
+
+func TestNormalizeReasoningBudgetPreservesClientCompletionLimitByDefault(t *testing.T) {
+	policy := `{"enabled":true,"defaultTokenBudget":32768,"maxTokenBudget":32768,"answerReserveTokens":32,"transport":"dynamo_nvext"}`
+	got, _, err := normalizeReasoningBudget(policy, []byte(`{"model":"glm-5.2","max_completion_tokens":145}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["max_completion_tokens"] != float64(145) {
+		t.Fatalf("client completion limit changed without an override: %s", got)
+	}
+}

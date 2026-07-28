@@ -41,11 +41,13 @@ func reasoningPolicyForModel(config *filterapi.RuntimeConfig, model string) (str
 }
 
 type reasoningPolicy struct {
-	Enabled             bool   `json:"enabled"`
-	DefaultTokenBudget  int64  `json:"defaultTokenBudget"`
-	MaxTokenBudget      int64  `json:"maxTokenBudget"`
-	AnswerReserveTokens int64  `json:"answerReserveTokens"`
-	Transport           string `json:"transport"`
+	Enabled                     bool   `json:"enabled"`
+	DefaultTokenBudget          int64  `json:"defaultTokenBudget"`
+	MaxTokenBudget              int64  `json:"maxTokenBudget"`
+	AnswerReserveTokens         int64  `json:"answerReserveTokens"`
+	OverrideMaxCompletionTokens bool   `json:"overrideMaxCompletionTokens"`
+	MaxCompletionTokens         int64  `json:"maxCompletionTokens"`
+	Transport                   string `json:"transport"`
 }
 
 // normalizeReasoningBudget preserves an explicit client budget, supplies the
@@ -68,6 +70,12 @@ func normalizeReasoningBudgetAfterTranslation(header string, sourceBody, targetB
 	}
 	if policy.Transport != "openai" && policy.Transport != "dynamo_nvext" {
 		return nil, false, fmt.Errorf("unsupported reasoning policy transport %q", policy.Transport)
+	}
+	if policy.OverrideMaxCompletionTokens && policy.MaxCompletionTokens <= 0 {
+		return nil, false, fmt.Errorf("max completion tokens must be positive when override is enabled")
+	}
+	if !policy.OverrideMaxCompletionTokens && policy.MaxCompletionTokens != 0 {
+		return nil, false, fmt.Errorf("max completion tokens requires override")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(sourceBody))
 	decoder.UseNumber()
@@ -99,9 +107,15 @@ func normalizeReasoningBudgetAfterTranslation(header string, sourceBody, targetB
 	if budget > policy.MaxTokenBudget {
 		budget = policy.MaxTokenBudget
 	}
-	if output, set, fieldErr := completionLimit(source); fieldErr != nil {
-		return nil, false, fieldErr
-	} else if set {
+	output, outputSet, outputErr := completionLimit(source)
+	if outputErr != nil {
+		return nil, false, outputErr
+	}
+	if policy.OverrideMaxCompletionTokens {
+		output = policy.MaxCompletionTokens
+		outputSet = true
+	}
+	if outputSet {
 		available := output - policy.AnswerReserveTokens
 		if available < 0 {
 			available = 0
@@ -115,6 +129,11 @@ func normalizeReasoningBudgetAfterTranslation(header string, sourceBody, targetB
 	var request map[string]any
 	if err := targetDecoder.Decode(&request); err != nil {
 		return nil, false, fmt.Errorf("invalid translated request body for reasoning policy: %w", err)
+	}
+	if policy.OverrideMaxCompletionTokens {
+		delete(request, "max_tokens")
+		delete(request, "max_completion_tokens")
+		request["max_completion_tokens"] = policy.MaxCompletionTokens
 	}
 	delete(request, "thinking_token_budget")
 	targetNVExt, _ := request["nvext"].(map[string]any)
