@@ -836,6 +836,82 @@ func Test_chatCompletionProcessorUpstreamFilter_UsesRouteReasoningPolicyBeforeBo
 	require.Contains(t, string(immediate.Body), "thinking_token_budget and nvext.max_thinking_tokens conflict")
 }
 
+func Test_chatCompletionProcessorUpstreamFilter_UsesSelectedBackendStreamUsagePolicy(t *testing.T) {
+	raw := []byte(`{"model":"qwen-alias","stream":true,"stream_options":{"include_usage":false},"max_completion_tokens":8192}`)
+	body := openai.ChatCompletionRequest{Model: "qwen-alias", Stream: true, StreamOptions: &openai.StreamOptions{}}
+	headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "qwen-alias"}
+	p := &chatCompletionProcessorUpstreamFilter{
+		parent: &chatCompletionProcessorRouterFilter{
+			config:                 &filterapi.RuntimeConfig{},
+			logger:                 slog.Default(),
+			originalRequestBodyRaw: raw,
+			originalRequestBody:    &body,
+			originalModel:          "qwen-alias",
+			stream:                 true,
+		},
+		requestHeaders:    headers,
+		metrics:           &mockMetrics{},
+		reasoningPolicy:   `{"enabled":true,"defaultTokenBudget":32768,"maxTokenBudget":32768,"answerReserveTokens":4096,"transport":"dynamo_nvext"}`,
+		streamUsagePolicy: `{"enabled":true}`,
+		logger:            slog.Default(),
+		translator: &mockTranslator{
+			t:               t,
+			expRequestBody:  &body,
+			retBodyMutation: []byte(`{"model":"Qwen backend display name","stream":true,"stream_options":{"include_usage":false},"max_completion_tokens":8192}`),
+		},
+	}
+
+	resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+	require.NoError(t, err)
+	common := resp.GetRequestHeaders().Response
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(common.BodyMutation.GetBody(), &got))
+	require.Equal(t, "Qwen backend display name", got["model"])
+	options, ok := got["stream_options"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, options["include_usage"])
+	nvext, ok := got["nvext"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(4096), nvext["max_thinking_tokens"])
+}
+
+func Test_chatCompletionProcessorUpstreamFilter_CompilesAndStripsInferencePolicy(t *testing.T) {
+	raw := []byte(`{"model":"model-canary","messages":[{"role":"user","content":"Who are you?"}]}`)
+	body := openai.ChatCompletionRequest{Model: "model-canary"}
+	headers := map[string]string{
+		internalapi.ModelNameHeaderKeyDefault: "model-canary",
+		inferencePolicyBundleHeader:           `{"untrusted":true}`,
+	}
+	p := &chatCompletionProcessorUpstreamFilter{
+		parent: &chatCompletionProcessorRouterFilter{
+			config:                 &filterapi.RuntimeConfig{},
+			logger:                 slog.Default(),
+			originalRequestBodyRaw: raw,
+			originalRequestBody:    &body,
+			originalModel:          "model-canary",
+		},
+		requestHeaders:        headers,
+		metrics:               &mockMetrics{},
+		inferencePolicyBundle: testInferencePolicyHeader(t, "append"),
+		logger:                slog.Default(),
+		translator: &mockTranslator{
+			t:               t,
+			expRequestBody:  &body,
+			retBodyMutation: raw,
+		},
+	}
+
+	resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+	require.NoError(t, err)
+	common := resp.GetRequestHeaders().Response
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(common.BodyMutation.GetBody(), &request))
+	messages := request["messages"].([]any)
+	require.Equal(t, "system", messages[0].(map[string]any)["role"])
+	require.Contains(t, messages[0].(map[string]any)["content"], "served by Viettel AI")
+	require.Contains(t, common.HeaderMutation.RemoveHeaders, inferencePolicyBundleHeader)
+}
+
 func Test_messagesProcessorUpstreamFilter_ProcessRequestHeaders_AWSAnthropicBetaHeader(t *testing.T) {
 	body := anthropicschema.MessagesRequest{
 		Model:     "anthropic.claude-3-sonnet-20240229-v1:0",

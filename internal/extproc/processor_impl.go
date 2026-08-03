@@ -143,20 +143,22 @@ type (
 	upstreamProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]] struct {
 		parent *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]
 
-		logger             *slog.Logger
-		requestHeaders     map[string]string
-		responseHeaders    map[string]string
-		responseEncoding   string
-		compressedBuf      []byte // accumulates raw compressed bytes across streaming chunks
-		decompressedOffset int    // tracks decompressed bytes already returned
-		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
-		modelNameOverride  internalapi.ModelNameOverride
-		headerMutator      *headermutator.HeaderMutator
-		reasoningPolicy    string
-		bodyMutator        *bodymutator.BodyMutator
-		backendName        string
-		routeName          string
-		handler            filterapi.BackendAuthHandler
+		logger                *slog.Logger
+		requestHeaders        map[string]string
+		responseHeaders       map[string]string
+		responseEncoding      string
+		compressedBuf         []byte // accumulates raw compressed bytes across streaming chunks
+		decompressedOffset    int    // tracks decompressed bytes already returned
+		translator            translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
+		modelNameOverride     internalapi.ModelNameOverride
+		headerMutator         *headermutator.HeaderMutator
+		reasoningPolicy       string
+		streamUsagePolicy     string
+		inferencePolicyBundle string
+		bodyMutator           *bodymutator.BodyMutator
+		backendName           string
+		routeName             string
+		handler               filterapi.BackendAuthHandler
 		// cost is the cost of the request that is accumulated during the processing of the response.
 		costs metrics.TokenUsage
 		// metrics tracking.
@@ -312,6 +314,31 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 			originalModel, body, stream, _, err = r.eh.ParseBody(normalized, costConfigured)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse normalized reasoning request: %w", err)
+			}
+			mutatedOriginalBody = normalized
+		}
+	}
+	streamUsagePolicy, streamUsagePolicyErr := streamUsagePolicyForModel(r.config, authorizedModel)
+	if streamUsagePolicyErr != nil {
+		return nil, fmt.Errorf("cannot resolve stream usage policy: %w", streamUsagePolicyErr)
+	}
+	if streamUsagePolicy == "" && costConfigured {
+		streamUsagePolicy = `{"enabled":true}`
+	}
+	if streamUsagePolicy != "" {
+		policyBody := rawBody.Body
+		if mutatedOriginalBody != nil {
+			policyBody = mutatedOriginalBody
+		}
+		normalized, changed, normalizeErr := normalizeStreamUsage(streamUsagePolicy, policyBody)
+		if normalizeErr != nil {
+			r.logger.Info("rejecting invalid stream usage policy request", slog.String("error", normalizeErr.Error()))
+			return createUserFacingErrorResponse(422, "UnprocessableEntity", normalizeErr.Error()), nil
+		}
+		if changed {
+			originalModel, body, stream, _, err = r.eh.ParseBody(normalized, costConfigured)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse normalized stream usage request: %w", err)
 			}
 			mutatedOriginalBody = normalized
 		}
@@ -497,6 +524,26 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		return createUserFacingErrorResponse(422, "UnprocessableEntity", policyErr.Error()), nil
 	} else if changed {
 		newBody = normalized
+		policyBody = normalized
+		forceBodyMutation = true
+	}
+	if normalized, changed, policyErr := normalizeStreamUsage(u.streamUsagePolicy, policyBody); policyErr != nil {
+		u.logger.Info("rejecting invalid stream usage policy request", slog.String("error", policyErr.Error()))
+		u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorInvalidRequest, u.requestHeaders)
+		u.publishEvent(ctx, false, string(metrics.GenAIErrorInvalidRequest), nil)
+		return createUserFacingErrorResponse(422, "UnprocessableEntity", policyErr.Error()), nil
+	} else if changed {
+		newBody = normalized
+		policyBody = normalized
+		forceBodyMutation = true
+	}
+	if normalized, changed, policyErr := normalizeInferencePolicy(u.inferencePolicyBundle, policyBody); policyErr != nil {
+		u.logger.Info("rejecting invalid inference policy request", slog.String("error", policyErr.Error()))
+		u.metrics.RecordRequestCompletion(ctx, false, metrics.GenAIErrorInvalidRequest, u.requestHeaders)
+		u.publishEvent(ctx, false, string(metrics.GenAIErrorInvalidRequest), nil)
+		return createUserFacingErrorResponse(422, "UnprocessableEntity", policyErr.Error()), nil
+	} else if changed {
+		newBody = normalized
 		forceBodyMutation = true
 	}
 
@@ -506,12 +553,26 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	if u.requestHeaders[reasoningPolicyHeader] != "" || u.reasoningPolicy != "" {
 		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, reasoningPolicyHeader)
 	}
+	if u.requestHeaders[streamUsagePolicyHeader] != "" {
+		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, streamUsagePolicyHeader)
+	}
+	if u.requestHeaders[inferencePolicyBundleHeader] != "" || u.inferencePolicyBundle != "" {
+		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, inferencePolicyBundleHeader)
+	}
 
 	// Apply header mutations from the route and also restore original headers on retry.
 	if u.headerMutator != nil {
 		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, routeHeaderRemoves...)
 		for _, hdr := range routeHeaderSets {
 			if strings.EqualFold(hdr.Key(), reasoningPolicyHeader) {
+				continue
+			}
+			if strings.EqualFold(hdr.Key(), streamUsagePolicyHeader) {
+				headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, streamUsagePolicyHeader)
+				continue
+			}
+			if strings.EqualFold(hdr.Key(), inferencePolicyBundleHeader) {
+				headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, inferencePolicyBundleHeader)
 				continue
 			}
 			headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
@@ -845,16 +906,25 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}
 	u.handler = backend.Handler
 	u.reasoningPolicy = ""
+	u.streamUsagePolicy = ""
+	u.inferencePolicyBundle = ""
 	if mutation := backend.Backend.HeaderMutation; mutation != nil {
 		for _, hdr := range mutation.Set {
-			if strings.EqualFold(hdr.Name, reasoningPolicyHeader) {
+			switch {
+			case strings.EqualFold(hdr.Name, reasoningPolicyHeader):
 				u.reasoningPolicy = hdr.Value
-				break
+			case strings.EqualFold(hdr.Name, streamUsagePolicyHeader):
+				u.streamUsagePolicy = hdr.Value
+			case strings.EqualFold(hdr.Name, inferencePolicyBundleHeader):
+				u.inferencePolicyBundle = hdr.Value
 			}
 		}
 	}
 	if u.reasoningPolicy != "" {
 		u.logger.Debug("selected backend reasoning policy", slog.String("backend", backend.Backend.Name))
+	}
+	if u.inferencePolicyBundle != "" {
+		u.logger.Debug("selected backend inference policy bundle", slog.String("backend", backend.Backend.Name))
 	}
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
 	u.bodyMutator = bodymutator.NewBodyMutator(backend.Backend.BodyMutation, rp.originalRequestBodyRaw)

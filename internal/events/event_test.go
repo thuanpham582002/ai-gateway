@@ -126,6 +126,69 @@ func TestPublisherStateDirectHTTP(t *testing.T) {
 	require.Equal(t, bodyHash(request), event.RequestBody.SHA256)
 }
 
+func TestPublisherStateBuildsSanitizedRequestAudit(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 1024)
+	state.SetRequestBody([]byte(`{
+		"model":"demo","stream":true,"max_tokens":128,
+		"messages":[
+			{"role":"user","content":"private prompt"},
+			{"role":"assistant","content":"private answer","tool_calls":[
+				{"id":"call-1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/a\"}"}}
+			]},
+			{"role":"tool","tool_call_id":"call-1","content":"private tool result"}
+		],
+		"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]
+	}`))
+
+	event := state.buildEvent(true, "", nil, 0, 0, 0, nil)
+	require.NotNil(t, event.RequestAudit)
+	require.False(t, event.RequestAudit.Truncated)
+	require.NotContains(t, event.RequestAudit.Body, "messages")
+	require.Equal(t, "demo", event.RequestAudit.Body["model"])
+	require.Equal(t, float64(128), event.RequestAudit.Body["max_tokens"])
+	require.Len(t, event.RequestAudit.ToolCalls, 1)
+	require.Equal(t, ToolCallAudit{
+		ID: "call-1", Type: "function", Name: "read", Arguments: `{"path":"/tmp/a"}`,
+	}, event.RequestAudit.ToolCalls[0])
+
+	encoded, err := json.Marshal(event.RequestAudit)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "private prompt")
+	require.NotContains(t, string(encoded), "private answer")
+	require.NotContains(t, string(encoded), "private tool result")
+}
+
+func TestPublisherStateExtractsResponsesAndAnthropicToolArguments(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		operation string
+		body      string
+		want      ToolCallAudit
+	}{
+		{
+			name: "responses function call", operation: "responses",
+			body: `{"model":"demo","input":[{"type":"message","content":"private"},{"type":"function_call","call_id":"call-r","name":"lookup","arguments":"{\"id\":7}"}]}`,
+			want: ToolCallAudit{ID: "call-r", Type: "function_call", Name: "lookup", Arguments: `{"id":7}`},
+		},
+		{
+			name: "anthropic tool use", operation: "messages",
+			body: `{"model":"demo","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"shell","input":{"command":"date"}}]}]}`,
+			want: ToolCallAudit{ID: "tool-a", Type: "tool_use", Name: "shell", Arguments: `{"command":"date"}`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := newPublisherState(test.operation, 1024)
+			state.SetRequestBody([]byte(test.body))
+			event := state.buildEvent(true, "", nil, 0, 0, 0, nil)
+			require.NotNil(t, event.RequestAudit)
+			require.Equal(t, []ToolCallAudit{test.want}, event.RequestAudit.ToolCalls)
+		})
+	}
+}
+
 func TestPublisherStateNeverEmitsCredentialHeaders(t *testing.T) {
 	t.Parallel()
 	state := newPublisherState("chat", 0)

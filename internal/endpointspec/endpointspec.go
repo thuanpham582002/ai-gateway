@@ -17,8 +17,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tidwall/sjson"
-
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	cohereschema "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -122,28 +120,13 @@ var errMultipartNotSupported = fmt.Errorf("%w: multipart body not supported for 
 // ParseBody implements [EndpointSpec.ParseBody].
 func (ChatCompletionsEndpointSpec) ParseBody(
 	body []byte,
-	costConfigured bool,
+	_ bool,
 ) (internalapi.OriginalModel, *openai.ChatCompletionRequest, bool, []byte, error) {
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v1/chat/completions: %w", internalapi.ErrMalformedRequest, err)
 	}
-	var mutatedBody []byte
-	if req.Stream && costConfigured && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
-		// If the request is a streaming request and cost metrics are configured, we need to include usage in the response
-		// to avoid the bypassing of the token usage calculation.
-		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
-		// Rewrite the original bytes to include the stream_options.include_usage=true so that forcing the request body
-		// mutation, which uses this raw body, will also result in the stream_options.include_usage=true.
-		var err error
-		mutatedBody, err = sjson.SetBytesOptions(body, "stream_options.include_usage", true, &sjson.Options{
-			Optimistic: false,
-		})
-		if err != nil {
-			return "", nil, false, nil, fmt.Errorf("%w: failed to set stream_options.include_usage", internalapi.ErrMalformedRequest)
-		}
-	}
-	return req.Model, &req, req.Stream, mutatedBody, nil
+	return req.Model, &req, req.Stream, nil, nil
 }
 
 // ParseMultipartBody implements [Spec.ParseMultipartBody].

@@ -28,7 +28,7 @@ func TestChatCompletionsEndpointSpec_ParseBody(t *testing.T) {
 		require.ErrorContains(t, err, "malformed request")
 	})
 
-	t.Run("streaming_without_include_usage", func(t *testing.T) {
+	t.Run("streaming_without_include_usage_is_preserved_for_policy_layer", func(t *testing.T) {
 		req := openai.ChatCompletionRequest{Model: "gpt-4o", Stream: true}
 		body, err := json.Marshal(req)
 		require.NoError(t, err)
@@ -38,14 +38,8 @@ func TestChatCompletionsEndpointSpec_ParseBody(t *testing.T) {
 		require.Equal(t, "gpt-4o", model)
 		require.True(t, stream)
 		require.NotNil(t, parsed)
-		require.NotNil(t, parsed.StreamOptions)
-		require.True(t, parsed.StreamOptions.IncludeUsage)
-		require.NotNil(t, mutated)
-
-		var mutatedReq openai.ChatCompletionRequest
-		require.NoError(t, json.Unmarshal(mutated, &mutatedReq))
-		require.NotNil(t, mutatedReq.StreamOptions)
-		require.True(t, mutatedReq.StreamOptions.IncludeUsage)
+		require.Nil(t, parsed.StreamOptions)
+		require.Nil(t, mutated)
 	})
 
 	t.Run("streaming_with_include_usage_already_true", func(t *testing.T) {

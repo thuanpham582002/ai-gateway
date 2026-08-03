@@ -58,7 +58,8 @@ func TestNormalizeReasoningBudget(t *testing.T) {
 		{name: "default", body: `{"model":"glm"}`, want: 32768},
 		{name: "preserve client", body: `{"model":"glm","thinking_token_budget":16000}`, want: 16000},
 		{name: "clamp shape max", body: `{"model":"glm","thinking_token_budget":100000}`, want: 65536},
-		{name: "reserve answer", body: `{"model":"glm","thinking_token_budget":16000,"max_tokens":8192}`, want: 4096},
+		{name: "reserve answer for explicit reasoning", body: `{"model":"glm","thinking_token_budget":16000,"max_tokens":8192}`, want: 4096},
+		{name: "reserve answer for default reasoning", body: `{"model":"glm","max_completion_tokens":8192}`, want: 4096},
 		{name: "explicit zero", body: `{"model":"glm","thinking_token_budget":0}`, want: 0},
 	}
 	for _, tt := range tests {

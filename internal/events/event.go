@@ -38,9 +38,28 @@ type RequestEvent struct {
 	Headers             map[string]string `json:"headers,omitempty"`
 	SelectedPool        string            `json:"selected_pool,omitempty"`
 	ModelNameOverride   string            `json:"model_name_override,omitempty"`
+	RequestAudit        *RequestAudit     `json:"request_audit,omitempty"`
 	RequestBody         *BodySnapshot     `json:"request_body,omitempty"`
 	UpstreamRequestBody *BodySnapshot     `json:"upstream_request_body,omitempty"`
 	ResponseBody        *BodySnapshot     `json:"response_body,omitempty"`
+}
+
+// RequestAudit retains non-content request options and actual tool calls while
+// excluding prompts, messages, inputs, tool results, and generated text.
+type RequestAudit struct {
+	Body          map[string]any  `json:"body,omitempty"`
+	ToolCalls     []ToolCallAudit `json:"tool_calls,omitempty"`
+	Truncated     bool            `json:"truncated"`
+	argumentBytes int
+}
+
+// ToolCallAudit is the bounded, content-free routing view of a tool call.
+// Arguments are retained explicitly for operational debugging.
+type ToolCallAudit struct {
+	ID        string `json:"id,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // ClientInfo identifies a known client without making client detection part of routing.

@@ -56,11 +56,36 @@
     },
     "selected_pool": {"type": "string"},
     "model_name_override": {"type": "string"},
+    "request_audit": {"$ref": "#/$defs/request_audit"},
     "request_body": {"$ref": "#/$defs/body_snapshot"},
     "upstream_request_body": {"$ref": "#/$defs/body_snapshot"},
     "response_body": {"$ref": "#/$defs/body_snapshot"}
   },
   "$defs": {
+    "request_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["truncated"],
+      "properties": {
+        "body": {"type": "object"},
+        "tool_calls": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/tool_call_audit"}
+        },
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "tool_call_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "name": {"type": "string", "minLength": 1},
+        "arguments": {"type": "string", "maxLength": 65536}
+      }
+    },
     "client": {
       "type": "object",
       "additionalProperties": false,

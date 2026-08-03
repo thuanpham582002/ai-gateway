@@ -30,6 +30,7 @@ type publisherState struct {
 	bodyCaptureMaxBytes int
 	bodyStore           BodyStore
 	requestBody         *bodyCapture
+	requestAudit        *RequestAudit
 	upstreamRequestBody *bodyCapture
 	responseBody        *bodyCapture
 	responseMetadata    []byte
@@ -70,6 +71,7 @@ func (p *publisherState) SetRequestHeaders(headers map[string]string) {
 }
 
 func (p *publisherState) SetRequestBody(body []byte) {
+	p.requestAudit = buildRequestAudit(body)
 	p.requestBody = newBodyCaptureWithExternalStore(p.bodyCaptureMaxBytes, p.externalBodyMaxBytes())
 	p.requestBody.write(body)
 	p.extractNativeMetadata(body)
@@ -134,6 +136,7 @@ func (p *publisherState) buildEvent(success bool, errorType string, tokens *Toke
 		Headers:             filterEventHeaders(p.headers, headerKeys),
 		SelectedPool:        p.selectedPool,
 		ModelNameOverride:   p.modelNameOverride,
+		RequestAudit:        p.requestAudit,
 		RequestBody:         requestBody,
 		UpstreamRequestBody: upstreamRequestBody,
 		ResponseBody:        p.responseBody.snapshot(),
