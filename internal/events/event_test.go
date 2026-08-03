@@ -159,6 +159,47 @@ func TestPublisherStateBuildsSanitizedRequestAudit(t *testing.T) {
 	require.NotContains(t, string(encoded), "private tool result")
 }
 
+func TestPublisherStateBuildsContentFreeParseFailureDiagnostic(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("responses", 4096)
+	state.SetRequestHeaders(map[string]string{
+		"user-agent":   "Codex Desktop/0.146.0-alpha.9.2",
+		"x-request-id": "req-parse-1",
+	})
+	state.SetRequestID("req-parse-1")
+	state.SetRequestParseFailure([]byte(`{
+		"model":"model-canary",
+		"stream":true,
+		"instructions":"private system prompt",
+		"input":"private user prompt",
+		"tools":[
+			{"type":"function","name":"private_function","parameters":{"secret":"value"}},
+			{"type":"namespace","name":"private_namespace"},
+			{"type":"tool_search","description":"private description"}
+		]
+	}`), "malformed request: unknown tool type")
+
+	event := state.buildEvent(false, "malformed_request", nil, 0, 0, 0, nil)
+	require.Equal(t, "model-canary", event.OriginalModel)
+	require.Equal(t, "model-canary", event.RequestModel)
+	require.True(t, event.Stream)
+	require.Equal(t, &ParseFailureInfo{
+		Stage: "request_body_parse", Message: "malformed request: unknown tool type",
+		ToolTypes: []string{"function", "namespace", "tool_search"},
+	}, event.ParseFailure)
+	require.Nil(t, event.RequestAudit)
+	require.Nil(t, event.RequestBody)
+
+	encoded, err := json.Marshal(event)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "private system prompt")
+	require.NotContains(t, string(encoded), "private user prompt")
+	require.NotContains(t, string(encoded), "private_function")
+	require.NotContains(t, string(encoded), "private_namespace")
+	require.NotContains(t, string(encoded), "private description")
+	require.NotContains(t, string(encoded), "secret")
+}
+
 func TestPublisherStateExtractsResponsesAndAnthropicToolArguments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

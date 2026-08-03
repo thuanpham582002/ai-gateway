@@ -305,10 +305,14 @@ func (m *mockMetrics) RequireRequestSuccess(t *testing.T) {
 var _ metrics.Metrics = &mockMetrics{}
 
 // mockEventFactory implements [events.Factory] for testing.
-type mockEventFactory struct{}
+type mockEventFactory struct {
+	publishers []*mockEventPublisher
+}
 
 func (m *mockEventFactory) NewPublisher(string) events.Publisher {
-	return &mockEventPublisher{}
+	publisher := &mockEventPublisher{}
+	m.publishers = append(m.publishers, publisher)
+	return publisher
 }
 
 // mockEventPublisher implements [events.Publisher] for testing.
@@ -319,6 +323,9 @@ type mockEventPublisher struct {
 	upstreamRequestBody []byte
 	responseBody        []byte
 	runID               string
+	parseFailureBody    []byte
+	parseFailureMessage string
+	lastErrorType       string
 }
 
 func (m *mockEventPublisher) SetRequestID(string)                 {}
@@ -331,6 +338,10 @@ func (m *mockEventPublisher) SetSelectedPool(string)              {}
 func (m *mockEventPublisher) SetModelNameOverride(string)         {}
 func (m *mockEventPublisher) SetStream(bool)                      {}
 func (m *mockEventPublisher) SetRequestHeaders(map[string]string) {}
+func (m *mockEventPublisher) SetRequestParseFailure(body []byte, message string) {
+	m.parseFailureBody = append([]byte(nil), body...)
+	m.parseFailureMessage = message
+}
 func (m *mockEventPublisher) SetRequestBody(body []byte) {
 	m.requestBody = append([]byte(nil), body...)
 }
@@ -341,9 +352,10 @@ func (m *mockEventPublisher) ObserveResponseBody(body []byte) {
 	m.responseBody = append(m.responseBody, body...)
 }
 func (m *mockEventPublisher) RunID() string { return m.runID }
-func (m *mockEventPublisher) Publish(_ context.Context, success bool, _ string, _ *events.TokenInfo, _, _, _ float64) {
+func (m *mockEventPublisher) Publish(_ context.Context, success bool, errorType string, _ *events.TokenInfo, _, _, _ float64) {
 	m.publishCount++
 	m.lastSuccess = success
+	m.lastErrorType = errorType
 }
 
 var _ events.Publisher = &mockEventPublisher{}

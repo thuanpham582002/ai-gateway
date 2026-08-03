@@ -69,7 +69,7 @@ func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
 		logger = logger.With("isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
-			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction), nil
+			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction, ef, operation), nil
 		}
 		var pub events.Publisher
 		if ef != nil {
@@ -136,6 +136,8 @@ type (
 		debugLogEnabled     bool
 		enableRedaction     bool
 		authorizer          compatibleauth.Authorizer
+		eventFactory        events.Factory
+		operation           string
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -175,6 +177,8 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 	logger *slog.Logger,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	enableRedaction bool,
+	eventFactory events.Factory,
+	operation string,
 ) *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT] {
 	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	return &routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]{
@@ -185,6 +189,8 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 		forceBodyMutation: false,
 		debugLogEnabled:   debugLogEnabled,
 		enableRedaction:   enableRedaction,
+		eventFactory:      eventFactory,
+		operation:         operation,
 	}
 }
 
@@ -269,9 +275,27 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
 			// return to user as 400 -  e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
 			r.logger.Error("returning user-facing error for malformed request", slog.String("error", err.Error()))
+			r.publishRequestParseFailure(ctx, rawBody.Body, userFacingErr.Error())
 			return createUserFacingErrorResponse(400, "BadRequest", userFacingErr.Error()), nil
 		}
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
+	}
+	if r.operation == "responses" {
+		compatibilityBody := rawBody.Body
+		if mutatedOriginalBody != nil {
+			compatibilityBody = mutatedOriginalBody
+		}
+		normalized, changed, normalizeErr := normalizeResponsesCompatibility(compatibilityBody)
+		if normalizeErr != nil {
+			return nil, fmt.Errorf("failed to normalize Responses tool compatibility: %w", normalizeErr)
+		}
+		if changed {
+			originalModel, body, stream, _, err = r.eh.ParseBody(normalized, costConfigured)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse normalized Responses tool request: %w", err)
+			}
+			mutatedOriginalBody = normalized
+		}
 	}
 	authorizedModel := string(originalModel)
 	if r.authorizer != nil {
@@ -414,6 +438,19 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 			},
 		},
 	}, nil
+}
+
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) publishRequestParseFailure(
+	ctx context.Context, body []byte, message string,
+) {
+	if r.eventFactory == nil {
+		return
+	}
+	pub := r.eventFactory.NewPublisher(r.operation)
+	pub.SetRequestID(r.requestHeaders["x-request-id"])
+	pub.SetRequestHeaders(r.requestHeaders)
+	pub.SetRequestParseFailure(body, message)
+	pub.Publish(ctx, false, "malformed_request", nil, 0, 0, 0)
 }
 
 func compatibleAuthImmediateResponse(decision compatibleauth.Decision) *extprocv3.ProcessingResponse {

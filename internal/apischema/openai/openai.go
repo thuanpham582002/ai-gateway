@@ -2842,6 +2842,11 @@ type ResponseToolUnion struct {
 	OfCustom           *CustomToolParam
 	OfWebSearchPreview *WebSearchPreviewToolParam
 	OfApplyPatch       *ApplyPatchToolParam
+	// Namespace and tool_search are platform extension tools whose schemas evolve
+	// independently of the public Responses schema. Preserve their complete JSON
+	// objects so the OpenAI-to-OpenAI translator can pass them through unchanged.
+	OfNamespace  json.RawMessage
+	OfToolSearch json.RawMessage
 }
 
 func (t ResponseToolUnion) MarshalJSON() ([]byte, error) { // nolint:gocritic
@@ -2870,6 +2875,10 @@ func (t ResponseToolUnion) MarshalJSON() ([]byte, error) { // nolint:gocritic
 		return json.Marshal(t.OfWebSearchPreview)
 	case t.OfApplyPatch != nil:
 		return json.Marshal(t.OfApplyPatch)
+	case len(t.OfNamespace) > 0:
+		return t.OfNamespace, nil
+	case len(t.OfToolSearch) > 0:
+		return t.OfToolSearch, nil
 	default:
 		return nil, errors.New("no tool to marshal in ToolUnionParam")
 	}
@@ -2950,6 +2959,10 @@ func (t *ResponseToolUnion) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		t.OfApplyPatch = &ap
+	case "namespace":
+		t.OfNamespace = append(json.RawMessage(nil), data...)
+	case "tool_search":
+		t.OfToolSearch = append(json.RawMessage(nil), data...)
 	default:
 		return errors.New("unknown tool type")
 	}

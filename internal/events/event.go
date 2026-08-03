@@ -39,9 +39,19 @@ type RequestEvent struct {
 	SelectedPool        string            `json:"selected_pool,omitempty"`
 	ModelNameOverride   string            `json:"model_name_override,omitempty"`
 	RequestAudit        *RequestAudit     `json:"request_audit,omitempty"`
+	ParseFailure        *ParseFailureInfo `json:"parse_failure,omitempty"`
 	RequestBody         *BodySnapshot     `json:"request_body,omitempty"`
 	UpstreamRequestBody *BodySnapshot     `json:"upstream_request_body,omitempty"`
 	ResponseBody        *BodySnapshot     `json:"response_body,omitempty"`
+}
+
+// ParseFailureInfo is a bounded, content-free diagnostic for requests rejected
+// before routing. It intentionally records only tool discriminators.
+type ParseFailureInfo struct {
+	Stage              string   `json:"stage"`
+	Message            string   `json:"message"`
+	ToolTypes          []string `json:"tool_types,omitempty"`
+	ToolTypesTruncated bool     `json:"tool_types_truncated"`
 }
 
 // RequestAudit retains non-content request options and actual tool calls while

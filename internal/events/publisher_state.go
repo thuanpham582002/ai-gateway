@@ -31,6 +31,7 @@ type publisherState struct {
 	bodyStore           BodyStore
 	requestBody         *bodyCapture
 	requestAudit        *RequestAudit
+	parseFailure        *ParseFailureInfo
 	upstreamRequestBody *bodyCapture
 	responseBody        *bodyCapture
 	responseMetadata    []byte
@@ -74,6 +75,15 @@ func (p *publisherState) SetRequestBody(body []byte) {
 	p.requestAudit = buildRequestAudit(body)
 	p.requestBody = newBodyCaptureWithExternalStore(p.bodyCaptureMaxBytes, p.externalBodyMaxBytes())
 	p.requestBody.write(body)
+	p.extractNativeMetadata(body)
+}
+
+func (p *publisherState) SetRequestParseFailure(body []byte, message string) {
+	diagnostic, model, stream := buildParseFailureInfo(body, message)
+	p.parseFailure = diagnostic
+	p.originalModel = model
+	p.requestModel = model
+	p.stream = stream
 	p.extractNativeMetadata(body)
 }
 
@@ -137,6 +147,7 @@ func (p *publisherState) buildEvent(success bool, errorType string, tokens *Toke
 		SelectedPool:        p.selectedPool,
 		ModelNameOverride:   p.modelNameOverride,
 		RequestAudit:        p.requestAudit,
+		ParseFailure:        p.parseFailure,
 		RequestBody:         requestBody,
 		UpstreamRequestBody: upstreamRequestBody,
 		ResponseBody:        p.responseBody.snapshot(),

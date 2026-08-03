@@ -18,20 +18,21 @@ func (f *noopFactory) NewPublisher(string) Publisher { return noopPublisher{} }
 
 type noopPublisher struct{}
 
-func (noopPublisher) SetRequestID(string)                 {}
-func (noopPublisher) SetOriginalModel(string)             {}
-func (noopPublisher) SetRequestModel(string)              {}
-func (noopPublisher) SetResponseModel(string)             {}
-func (noopPublisher) SetBackend(string)                   {}
-func (noopPublisher) SetBackendName(string)               {}
-func (noopPublisher) SetSelectedPool(string)              {}
-func (noopPublisher) SetModelNameOverride(string)         {}
-func (noopPublisher) SetStream(bool)                      {}
-func (noopPublisher) SetRequestHeaders(map[string]string) {}
-func (noopPublisher) SetRequestBody([]byte)               {}
-func (noopPublisher) SetUpstreamRequestBody([]byte)       {}
-func (noopPublisher) ObserveResponseBody([]byte)          {}
-func (noopPublisher) RunID() string                       { return "" }
+func (noopPublisher) SetRequestID(string)                   {}
+func (noopPublisher) SetOriginalModel(string)               {}
+func (noopPublisher) SetRequestModel(string)                {}
+func (noopPublisher) SetResponseModel(string)               {}
+func (noopPublisher) SetBackend(string)                     {}
+func (noopPublisher) SetBackendName(string)                 {}
+func (noopPublisher) SetSelectedPool(string)                {}
+func (noopPublisher) SetModelNameOverride(string)           {}
+func (noopPublisher) SetStream(bool)                        {}
+func (noopPublisher) SetRequestHeaders(map[string]string)   {}
+func (noopPublisher) SetRequestParseFailure([]byte, string) {}
+func (noopPublisher) SetRequestBody([]byte)                 {}
+func (noopPublisher) SetUpstreamRequestBody([]byte)         {}
+func (noopPublisher) ObserveResponseBody([]byte)            {}
+func (noopPublisher) RunID() string                         { return "" }
 
 func (noopPublisher) Publish(context.Context, bool, string, *TokenInfo, float64, float64, float64) {
 }

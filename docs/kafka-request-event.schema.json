@@ -57,11 +57,27 @@
     "selected_pool": {"type": "string"},
     "model_name_override": {"type": "string"},
     "request_audit": {"$ref": "#/$defs/request_audit"},
+    "parse_failure": {"$ref": "#/$defs/parse_failure"},
     "request_body": {"$ref": "#/$defs/body_snapshot"},
     "upstream_request_body": {"$ref": "#/$defs/body_snapshot"},
     "response_body": {"$ref": "#/$defs/body_snapshot"}
   },
   "$defs": {
+    "parse_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "message", "tool_types_truncated"],
+      "properties": {
+        "stage": {"const": "request_body_parse"},
+        "message": {"type": "string", "maxLength": 1024},
+        "tool_types": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"type": "string", "maxLength": 128}
+        },
+        "tool_types_truncated": {"type": "boolean"}
+      }
+    },
     "request_audit": {
       "type": "object",
       "additionalProperties": false,

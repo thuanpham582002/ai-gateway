@@ -75,6 +75,7 @@ func TestNewFactory(t *testing.T) {
 type (
 	chatCompletionProcessorRouterFilter   = routerProcessor[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk, endpointspec.ChatCompletionsEndpointSpec]
 	chatCompletionProcessorUpstreamFilter = upstreamProcessor[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk, endpointspec.ChatCompletionsEndpointSpec]
+	responsesProcessorRouterFilter        = routerProcessor[openai.ResponseRequest, openai.Response, openai.ResponseStreamEventUnion, endpointspec.ResponsesEndpointSpec]
 	transcriptionProcessorRouterFilter    = routerProcessor[openai.TranscriptionRequest, openai.TranscriptionResponse, openai.TranscriptionStreamEvent, endpointspec.TranscriptionEndpointSpec]
 	transcriptionProcessorUpstreamFilter  = upstreamProcessor[openai.TranscriptionRequest, openai.TranscriptionResponse, openai.TranscriptionStreamEvent, endpointspec.TranscriptionEndpointSpec]
 	messagesProcessorRouterFilter         = routerProcessor[anthropicschema.MessagesRequest, anthropicschema.MessagesResponse, anthropicschema.MessagesStreamChunk, endpointspec.MessagesEndpointSpec]
@@ -180,10 +181,13 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 	})
 
 	t.Run("body parser error", func(t *testing.T) {
+		eventFactory := &mockEventFactory{}
 		p := &chatCompletionProcessorRouterFilter{
-			tracer: tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
-			config: &filterapi.RuntimeConfig{},
-			logger: slog.Default(),
+			tracer:       tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+			config:       &filterapi.RuntimeConfig{},
+			logger:       slog.Default(),
+			eventFactory: eventFactory,
+			operation:    "chat",
 		}
 		resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: []byte("nonjson")})
 		require.NoError(t, err, "Should not return error when returning immediate response")
@@ -197,6 +201,37 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.Contains(t, body, `"type":"BadRequest"`)
 		require.Contains(t, body, `"code":"400"`)
 		require.Contains(t, body, "malformed request: failed to parse JSON for /v1/chat/completions:")
+		require.Len(t, eventFactory.publishers, 1)
+		publisher := eventFactory.publishers[0]
+		require.Equal(t, []byte("nonjson"), publisher.parseFailureBody)
+		require.Contains(t, publisher.parseFailureMessage, "malformed request")
+		require.Equal(t, 1, publisher.publishCount)
+		require.False(t, publisher.lastSuccess)
+		require.Equal(t, "malformed_request", publisher.lastErrorType)
+	})
+
+	t.Run("responses unknown tool type publishes pre-route diagnostic", func(t *testing.T) {
+		eventFactory := &mockEventFactory{}
+		p := &responsesProcessorRouterFilter{
+			tracer:         tracingapi.NoopTracer[openai.ResponseRequest, openai.Response, openai.ResponseStreamEventUnion]{},
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: map[string]string{"x-request-id": "req-codex", "user-agent": "Codex Desktop/test"},
+			logger:         slog.Default(),
+			eventFactory:   eventFactory,
+			operation:      "responses",
+		}
+		body := []byte(`{"model":"model-canary","input":"hi","tools":[{"type":"future_tool","secret":"not-for-kafka"}]}`)
+		resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: body})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetImmediateResponse())
+		require.Equal(t, typev3.StatusCode(400), resp.GetImmediateResponse().Status.Code)
+		require.Len(t, eventFactory.publishers, 1)
+		publisher := eventFactory.publishers[0]
+		require.Equal(t, body, publisher.parseFailureBody)
+		require.Contains(t, publisher.parseFailureMessage, "unknown tool type")
+		require.Equal(t, 1, publisher.publishCount)
+		require.False(t, publisher.lastSuccess)
+		require.Equal(t, "malformed_request", publisher.lastErrorType)
 	})
 
 	t.Run("ok", func(t *testing.T) {

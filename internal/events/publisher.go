@@ -20,6 +20,7 @@ type Publisher interface {
 	SetModelNameOverride(override string)
 	SetStream(stream bool)
 	SetRequestHeaders(headers map[string]string)
+	SetRequestParseFailure(body []byte, message string)
 	SetRequestBody(body []byte)
 	SetUpstreamRequestBody(body []byte)
 	ObserveResponseBody(body []byte)

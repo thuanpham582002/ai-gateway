@@ -3009,6 +3009,20 @@ func TestResponseToolUnionMarshalJSON(t *testing.T) {
 			expRes: `{"type": "apply_patch"}`,
 		},
 		{
+			name: "marshal namespace extension",
+			input: ResponseToolUnion{
+				OfNamespace: json.RawMessage(`{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"read"}]}`),
+			},
+			expRes: `{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"read"}]}`,
+		},
+		{
+			name: "marshal tool search extension",
+			input: ResponseToolUnion{
+				OfToolSearch: json.RawMessage(`{"type":"tool_search","execution":"client"}`),
+			},
+			expRes: `{"type":"tool_search","execution":"client"}`,
+		},
+		{
 			name:   "marshal no field set",
 			input:  ResponseToolUnion{},
 			expErr: "no tool to marshal",
@@ -3241,6 +3255,20 @@ func TestResponseToolUnionUnmarshalJSON(t *testing.T) {
 			},
 		},
 		{
+			name:  "unmarshal namespace extension",
+			input: []byte(`{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"read"}]}`),
+			expRes: ResponseToolUnion{
+				OfNamespace: json.RawMessage(`{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"read"}]}`),
+			},
+		},
+		{
+			name:  "unmarshal tool search extension",
+			input: []byte(`{"type":"tool_search","execution":"client"}`),
+			expRes: ResponseToolUnion{
+				OfToolSearch: json.RawMessage(`{"type":"tool_search","execution":"client"}`),
+			},
+		},
+		{
 			name:   "unmarshal unknown type",
 			input:  []byte(`{"type":"unknown_tool"}`),
 			expErr: "unknown tool type",
@@ -3257,6 +3285,31 @@ func TestResponseToolUnionUnmarshalJSON(t *testing.T) {
 			require.Equal(t, tc.expRes, result)
 		})
 	}
+}
+
+func TestResponseRequestCodexExtensionToolsRoundTrip(t *testing.T) {
+	payload := []byte(`{
+		"model":"model-canary",
+		"instructions":"Keep existing client instructions.",
+		"input":"hello",
+		"tools":[
+			{"type":"function","name":"read","parameters":{"type":"object"}},
+			{"type":"custom","name":"shell","format":{"type":"text"}},
+			{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"write"}]},
+			{"type":"tool_search","execution":"client"},
+			{"type":"web_search"}
+		]
+	}`)
+
+	var request ResponseRequest
+	require.NoError(t, json.Unmarshal(payload, &request))
+	require.Len(t, request.Tools, 5)
+	require.NotEmpty(t, request.Tools[2].OfNamespace)
+	require.NotEmpty(t, request.Tools[3].OfToolSearch)
+
+	roundTripped, err := json.Marshal(request)
+	require.NoError(t, err)
+	require.JSONEq(t, string(payload), string(roundTripped))
 }
 
 func TestFileSearchToolFiltersUnionParamMarshalJSON(t *testing.T) {
