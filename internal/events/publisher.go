@@ -19,6 +19,8 @@ type Publisher interface {
 	SetSelectedPool(pool string)
 	SetModelNameOverride(override string)
 	SetStream(stream bool)
+	SetHTTPStatusCode(code int)
+	SetBackendError(body []byte, headers map[string]string)
 	SetRequestHeaders(headers map[string]string)
 	SetRequestParseFailure(body []byte, message string)
 	SetRequestBody(body []byte)

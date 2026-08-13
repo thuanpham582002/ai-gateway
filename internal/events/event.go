@@ -9,40 +9,56 @@ import "time"
 
 // RequestEvent represents a single per-request event emitted to Kafka.
 type RequestEvent struct {
-	SchemaVersion       int               `json:"schema_version"`
-	EventID             string            `json:"event_id"`
-	RunID               string            `json:"run_id"`
-	EventType           string            `json:"event_type"`
-	Timestamp           time.Time         `json:"timestamp"`
-	RequestID           string            `json:"request_id"`
-	Operation           string            `json:"operation"`
-	Protocol            string            `json:"protocol"`
-	Transport           string            `json:"transport"`
-	Client              *ClientInfo       `json:"client,omitempty"`
-	ConversationKey     string            `json:"conversation_key,omitempty"`
-	Correlation         *CorrelationInfo  `json:"correlation,omitempty"`
-	OriginalModel       string            `json:"original_model"`
-	RequestModel        string            `json:"request_model"`
-	ResponseModel       string            `json:"response_model"`
-	Backend             string            `json:"backend"`
-	BackendName         string            `json:"backend_name,omitempty"`
-	Success             bool              `json:"success"`
-	ErrorType           string            `json:"error_type,omitempty"`
-	LatencyMs           float64           `json:"latency_ms"`
-	Tokens              *TokenInfo        `json:"tokens,omitempty"`
-	Stream              bool              `json:"stream"`
-	TimeToFirstTokenMs  float64           `json:"time_to_first_token_ms,omitempty"`
-	InterTokenLatencyMs float64           `json:"inter_token_latency_ms,omitempty"`
-	Billing             *BillingInfo      `json:"billing,omitempty"`
-	CapturePolicy       CapturePolicy     `json:"capture_policy"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	SelectedPool        string            `json:"selected_pool,omitempty"`
-	ModelNameOverride   string            `json:"model_name_override,omitempty"`
-	RequestAudit        *RequestAudit     `json:"request_audit,omitempty"`
-	ParseFailure        *ParseFailureInfo `json:"parse_failure,omitempty"`
-	RequestBody         *BodySnapshot     `json:"request_body,omitempty"`
-	UpstreamRequestBody *BodySnapshot     `json:"upstream_request_body,omitempty"`
-	ResponseBody        *BodySnapshot     `json:"response_body,omitempty"`
+	SchemaVersion        int                 `json:"schema_version"`
+	EventID              string              `json:"event_id"`
+	RunID                string              `json:"run_id"`
+	EventType            string              `json:"event_type"`
+	Timestamp            time.Time           `json:"timestamp"`
+	RequestID            string              `json:"request_id"`
+	Operation            string              `json:"operation"`
+	Protocol             string              `json:"protocol"`
+	Transport            string              `json:"transport"`
+	Client               *ClientInfo         `json:"client,omitempty"`
+	ConversationKey      string              `json:"conversation_key,omitempty"`
+	Correlation          *CorrelationInfo    `json:"correlation,omitempty"`
+	OriginalModel        string              `json:"original_model"`
+	RequestModel         string              `json:"request_model"`
+	ResponseModel        string              `json:"response_model"`
+	Backend              string              `json:"backend"`
+	BackendName          string              `json:"backend_name,omitempty"`
+	Success              bool                `json:"success"`
+	ErrorType            string              `json:"error_type,omitempty"`
+	HTTPStatusCode       int                 `json:"http_status_code,omitempty"`
+	BackendErrorDetail   *BackendErrorDetail `json:"backend_error_detail,omitempty"`
+	LatencyMs            float64             `json:"latency_ms"`
+	Tokens               *TokenInfo          `json:"tokens,omitempty"`
+	Stream               bool                `json:"stream"`
+	TimeToFirstTokenMs   float64             `json:"time_to_first_token_ms,omitempty"`
+	InterTokenLatencyMs  float64             `json:"inter_token_latency_ms,omitempty"`
+	Billing              *BillingInfo        `json:"billing,omitempty"`
+	CapturePolicy        CapturePolicy       `json:"capture_policy"`
+	Headers              map[string]string   `json:"headers,omitempty"`
+	SelectedPool         string              `json:"selected_pool,omitempty"`
+	ModelNameOverride    string              `json:"model_name_override,omitempty"`
+	RequestAudit         *RequestAudit       `json:"request_audit,omitempty"`
+	MessageAudit         *MessageAudit       `json:"message_audit,omitempty"`
+	UpstreamMessageAudit *MessageAudit       `json:"upstream_message_audit,omitempty"`
+	ParseFailure         *ParseFailureInfo   `json:"parse_failure,omitempty"`
+	RequestBody          *BodySnapshot       `json:"request_body,omitempty"`
+	UpstreamRequestBody  *BodySnapshot       `json:"upstream_request_body,omitempty"`
+	ResponseBody         *BodySnapshot       `json:"response_body,omitempty"`
+}
+
+// BackendErrorDetail is a bounded, redacted diagnostic extracted from a
+// non-2xx JSON error envelope. Raw response bodies remain governed by the body
+// capture policy and may be removed by downstream sinks.
+type BackendErrorDetail struct {
+	Message          string `json:"message,omitempty"`
+	Type             string `json:"type,omitempty"`
+	Code             string `json:"code,omitempty"`
+	Param            string `json:"param,omitempty"`
+	BackendRequestID string `json:"backend_request_id,omitempty"`
+	Truncated        bool   `json:"truncated"`
 }
 
 // ParseFailureInfo is a bounded, content-free diagnostic for requests rejected
@@ -63,13 +79,22 @@ type RequestAudit struct {
 	argumentBytes int
 }
 
+// MessageAudit records conversation structure without retaining message content.
+type MessageAudit struct {
+	MessageCount           int      `json:"message_count"`
+	RoleSequence           []string `json:"role_sequence,omitempty"`
+	SystemMessageCount     int      `json:"system_message_count"`
+	SystemMessagePositions []int    `json:"system_message_positions,omitempty"`
+	InvalidMessageOrder    bool     `json:"invalid_message_order"`
+	Truncated              bool     `json:"truncated"`
+}
+
 // ToolCallAudit is the bounded, content-free routing view of a tool call.
 // Arguments are retained explicitly for operational debugging.
 type ToolCallAudit struct {
-	ID        string `json:"id,omitempty"`
-	Type      string `json:"type,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Type string `json:"type,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 // ClientInfo identifies a known client without making client detection part of routing.
