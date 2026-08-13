@@ -701,11 +701,11 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		if err := tracing.Shutdown(shutdownCtx); err != nil {
 			l.Error("Failed to shutdown tracing gracefully", "error", err)
 		}
-		eventShutdown()
-		bodyStoreShutdown()
 		if err := metricsShutdown(shutdownCtx); err != nil {
 			l.Error("Failed to shutdown metrics gracefully", "error", err)
 		}
+		eventShutdown()
+		bodyStoreShutdown()
 		if mcpServer != nil {
 			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
 				l.Error("Failed to shutdown mcp proxy server gracefully", "error", err)
