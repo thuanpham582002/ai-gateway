@@ -228,6 +228,21 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaRESTURL", "http://kafka-rest", "-kafkaEventSpoolDir", "/events"},
 				expectedError: "kafkaEventSpoolDir is supported only by the native Kafka producer",
 			},
+			{
+				name:          "native Kafka without durable outbox",
+				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaBrokers", "kafka:9092"},
+				expectedError: "kafkaEventSpoolDir is required by the native Kafka producer",
+			},
+			{
+				name:          "non-positive outbox byte limit",
+				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaEventOutboxMaxBytes", "0"},
+				expectedError: "kafkaEventOutboxMaxBytes must be positive",
+			},
+			{
+				name:          "non-positive outbox record limit",
+				args:          []string{"-configPath", "/path/to/config.yaml", "-kafkaEventOutboxMaxRecords", "0"},
+				expectedError: "kafkaEventOutboxMaxRecords must be positive",
+			},
 		}
 
 		for _, tt := range tests {
@@ -239,13 +254,26 @@ func Test_parseAndValidateFlags(t *testing.T) {
 	})
 }
 
+func TestParseAndValidateFlagsRejectsInvalidOutboxEnv(t *testing.T) {
+	t.Setenv("KAFKA_EVENT_OUTBOX_MAX_BYTES", "invalid")
+	t.Setenv("KAFKA_EVENT_OUTBOX_MAX_RECORDS", "invalid")
+
+	_, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
+	require.ErrorContains(t, err, "KAFKA_EVENT_OUTBOX_MAX_BYTES must be an integer")
+	require.ErrorContains(t, err, "KAFKA_EVENT_OUTBOX_MAX_RECORDS must be an integer")
+}
+
 func TestParseAndValidateFlagsKafkaBodyCaptureFromEnv(t *testing.T) {
 	t.Setenv("KAFKA_EVENT_BODY_MAX_BYTES", "4096")
 	t.Setenv("KAFKA_EVENT_SPOOL_DIR", "/var/lib/aigw/events")
+	t.Setenv("KAFKA_EVENT_OUTBOX_MAX_BYTES", "1048576")
+	t.Setenv("KAFKA_EVENT_OUTBOX_MAX_RECORDS", "2048")
 	flags, err := parseAndValidateFlags([]string{"-configPath", "/path/to/config.yaml"})
 	require.NoError(t, err)
 	require.Equal(t, 4096, flags.kafkaEventBodyMaxBytes)
 	require.Equal(t, "/var/lib/aigw/events", flags.kafkaEventSpoolDir)
+	require.Equal(t, int64(1048576), flags.kafkaEventOutboxMaxBytes)
+	require.Equal(t, int64(2048), flags.kafkaEventOutboxMaxRecords)
 }
 
 func TestParseAndValidateFlagsKafkaCustomCAFromEnv(t *testing.T) {
@@ -270,6 +298,7 @@ func TestParseAndValidateFlagsRejectsKafkaCAWithoutTLS(t *testing.T) {
 
 func TestParseAndValidateFlagsS3BodyStoreFromEnv(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "kafka:9092")
+	t.Setenv("KAFKA_EVENT_SPOOL_DIR", "/var/lib/aigw/events")
 	t.Setenv("KAFKA_EVENT_S3_BUCKET", "audit-bucket")
 	t.Setenv("KAFKA_EVENT_S3_ENDPOINT", "https://seaweedfs.example.test")
 	t.Setenv("KAFKA_EVENT_S3_REGION", "local")

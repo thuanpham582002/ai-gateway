@@ -73,6 +73,10 @@ type extProcFlags struct {
 	kafkaEventBodyMaxBytes int
 	// kafkaEventSpoolDir persists unacknowledged native Kafka events across process restarts.
 	kafkaEventSpoolDir string
+	// kafkaEventOutboxMaxBytes bounds the durable native Kafka outbox.
+	kafkaEventOutboxMaxBytes int64
+	// kafkaEventOutboxMaxRecords bounds the number of durable native Kafka events.
+	kafkaEventOutboxMaxRecords int64
 	// kafkaEventS3Bucket enables complete-body overflow storage in an S3-compatible bucket.
 	kafkaEventS3Bucket               string
 	kafkaEventS3Endpoint             string
@@ -187,7 +191,11 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	fs.IntVar(&flags.kafkaEventBodyMaxBytes, "kafkaEventBodyMaxBytes", 0,
 		"Maximum inline bytes captured for each request/response body in Kafka events. Zero emits hashes and sizes only.")
 	fs.StringVar(&flags.kafkaEventSpoolDir, "kafkaEventSpoolDir", "",
-		"Directory for fsynced unacknowledged Kafka events. Native Kafka producer only.")
+		"Directory for the transactional Kafka event outbox. Native Kafka producer only.")
+	fs.Int64Var(&flags.kafkaEventOutboxMaxBytes, "kafkaEventOutboxMaxBytes", 1<<30,
+		"Maximum logical bytes retained in the native Kafka event outbox.")
+	fs.Int64Var(&flags.kafkaEventOutboxMaxRecords, "kafkaEventOutboxMaxRecords", 1_000_000,
+		"Maximum records retained in the native Kafka event outbox.")
 	fs.StringVar(&flags.kafkaEventS3Bucket, "kafkaEventS3Bucket", "",
 		"S3-compatible bucket for complete bodies that exceed the Kafka inline limit. Empty disables S3 storage.")
 	fs.StringVar(&flags.kafkaEventS3Endpoint, "kafkaEventS3Endpoint", "",
@@ -243,6 +251,22 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	}
 	if flags.kafkaEventSpoolDir == "" {
 		flags.kafkaEventSpoolDir = os.Getenv("KAFKA_EVENT_SPOOL_DIR")
+	}
+	if value := os.Getenv("KAFKA_EVENT_OUTBOX_MAX_BYTES"); value != "" {
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("KAFKA_EVENT_OUTBOX_MAX_BYTES must be an integer: %w", parseErr))
+		} else {
+			flags.kafkaEventOutboxMaxBytes = parsed
+		}
+	}
+	if value := os.Getenv("KAFKA_EVENT_OUTBOX_MAX_RECORDS"); value != "" {
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("KAFKA_EVENT_OUTBOX_MAX_RECORDS must be an integer: %w", parseErr))
+		} else {
+			flags.kafkaEventOutboxMaxRecords = parsed
+		}
 	}
 	if flags.kafkaEventS3Bucket == "" {
 		flags.kafkaEventS3Bucket = os.Getenv("KAFKA_EVENT_S3_BUCKET")
@@ -352,6 +376,15 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 	}
 	if flags.kafkaRESTURL != "" && flags.kafkaEventSpoolDir != "" {
 		errs = append(errs, fmt.Errorf("kafkaEventSpoolDir is supported only by the native Kafka producer"))
+	}
+	if flags.kafkaBrokers != "" && flags.kafkaRESTURL == "" && flags.kafkaEventSpoolDir == "" {
+		errs = append(errs, fmt.Errorf("kafkaEventSpoolDir is required by the native Kafka producer"))
+	}
+	if flags.kafkaEventOutboxMaxBytes <= 0 {
+		errs = append(errs, fmt.Errorf("kafkaEventOutboxMaxBytes must be positive"))
+	}
+	if flags.kafkaEventOutboxMaxRecords <= 0 {
+		errs = append(errs, fmt.Errorf("kafkaEventOutboxMaxRecords must be positive"))
 	}
 	if !flags.kafkaTLSEnabled && (flags.kafkaTLSCABundle != "" || flags.kafkaTLSCAPEM != "") {
 		errs = append(errs, fmt.Errorf("Kafka CA configuration requires Kafka TLS"))
@@ -536,7 +569,10 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 			TLSCAPEM:            flags.kafkaTLSCAPEM,
 			BodyCaptureMaxBytes: flags.kafkaEventBodyMaxBytes,
 			SpoolDir:            flags.kafkaEventSpoolDir,
+			OutboxMaxBytes:      flags.kafkaEventOutboxMaxBytes,
+			OutboxMaxRecords:    flags.kafkaEventOutboxMaxRecords,
 			BodyStore:           bodyStore,
+			Meter:               meter,
 		}
 		eventFactory, eventShutdown, err = events.NewKafkaFactory(cfg, headerKeys, l)
 		if err != nil {
@@ -665,11 +701,11 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		if err := tracing.Shutdown(shutdownCtx); err != nil {
 			l.Error("Failed to shutdown tracing gracefully", "error", err)
 		}
+		eventShutdown()
+		bodyStoreShutdown()
 		if err := metricsShutdown(shutdownCtx); err != nil {
 			l.Error("Failed to shutdown metrics gracefully", "error", err)
 		}
-		eventShutdown()
-		bodyStoreShutdown()
 		if mcpServer != nil {
 			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
 				l.Error("Failed to shutdown mcp proxy server gracefully", "error", err)
