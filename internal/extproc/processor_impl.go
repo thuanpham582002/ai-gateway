@@ -374,6 +374,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		logger = r.logger
 	}
 
+	// Emit privacy-safe multimodal metadata at INFO from the original client body.
+	// This intentionally runs before any route/backend body mutation.
+	logSafeMultimodalRequest(logger, r.inboundRequestBodyRaw)
+
 	// Only log parsed request body when redaction is enabled
 	if r.debugLogEnabled && r.enableRedaction {
 		if redactedBody, err := r.eh.RedactSensitiveInfoFromRequest(body); err != nil {
