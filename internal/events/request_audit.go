@@ -11,7 +11,7 @@ import (
 const (
 	requestAuditMaxBytes     = 256 * 1024
 	requestAuditMaxToolCalls = 64
-	toolArgumentMaxBytes     = 64 * 1024
+	messageAuditMaxMessages  = 256
 )
 
 var requestContentFields = map[string]bool{
@@ -21,6 +21,44 @@ var requestContentFields = map[string]bool{
 	"messages":     true,
 	"prompt":       true,
 	"system":       true,
+	"tools":        true,
+}
+
+func buildMessageAudit(body []byte) *MessageAudit {
+	var request struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &request) != nil || request.Messages == nil {
+		return nil
+	}
+	audit := &MessageAudit{MessageCount: len(request.Messages)}
+	limit := len(request.Messages)
+	if limit > messageAuditMaxMessages {
+		limit = messageAuditMaxMessages
+		audit.Truncated = true
+	}
+	for index := 0; index < limit; index++ {
+		role := strings.ToLower(strings.TrimSpace(request.Messages[index].Role))
+		audit.RoleSequence = append(audit.RoleSequence, role)
+		if role == "system" {
+			audit.SystemMessageCount++
+			audit.SystemMessagePositions = append(audit.SystemMessagePositions, index)
+			if index != 0 {
+				audit.InvalidMessageOrder = true
+			}
+		}
+	}
+	for index := limit; index < len(request.Messages); index++ {
+		if strings.EqualFold(strings.TrimSpace(request.Messages[index].Role), "system") {
+			audit.SystemMessageCount++
+			if index != 0 {
+				audit.InvalidMessageOrder = true
+			}
+		}
+	}
+	return audit
 }
 
 func buildRequestAudit(body []byte) *RequestAudit {
@@ -133,36 +171,7 @@ func appendToolCall(call map[string]any, defaultType string, arguments any, audi
 	if typeName == "" {
 		typeName = defaultType
 	}
-	encoded := encodeToolArguments(arguments)
-	remaining := requestAuditMaxBytes - audit.argumentBytes
-	if remaining <= 0 {
-		audit.Truncated = true
-		return
-	}
-	limit := toolArgumentMaxBytes
-	if remaining < limit {
-		limit = remaining
-	}
-	if len(encoded) > limit {
-		encoded = encoded[:limit]
-		audit.Truncated = true
-	}
-	audit.argumentBytes += len(encoded)
 	audit.ToolCalls = append(audit.ToolCalls, ToolCallAudit{
-		ID: id, Type: typeName, Name: name, Arguments: encoded,
+		ID: id, Type: typeName, Name: name,
 	})
-}
-
-func encodeToolArguments(value any) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return ""
-	}
-	return string(encoded)
 }

@@ -105,7 +105,7 @@ type (
 	ResponsesCompactEndpointSpec struct{}
 	// MessagesEndpointSpec implements EndpointSpec for /v1/messages.
 	MessagesEndpointSpec struct{}
-	// RerankEndpointSpec implements EndpointSpec for /v2/rerank.
+	// RerankEndpointSpec implements EndpointSpec for Cohere-format /v2/rerank and /v1/rerank requests.
 	RerankEndpointSpec struct{}
 	// SpeechEndpointSpec implements EndpointSpec for /v1/audio/speech.
 	SpeechEndpointSpec struct{}
@@ -408,7 +408,7 @@ func (RerankEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *cohereschema.RerankV2Request, bool, []byte, error) {
 	var req cohereschema.RerankV2Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v2/rerank: %w", internalapi.ErrMalformedRequest, err)
+		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for rerank request: %w", internalapi.ErrMalformedRequest, err)
 	}
 	return req.Model, &req, false, nil, nil
 }
@@ -423,6 +423,14 @@ func (RerankEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, mod
 	switch schema.Name {
 	case filterapi.APISchemaCohere:
 		return translator.NewRerankCohereToCohereTranslator(schema.Version, modelNameOverride), nil
+	case filterapi.APISchemaOpenAI:
+		// vLLM BGE rerankers accept Cohere-shaped requests on the OpenAI /v1/rerank path.
+		// OpenAI's endpoint prefix is optional; default to v1 for the standard vLLM API.
+		apiPrefix := schema.OpenAIPrefix()
+		if apiPrefix == "" {
+			apiPrefix = "v1"
+		}
+		return translator.NewRerankCohereToCohereTranslator(apiPrefix, modelNameOverride), nil
 	default:
 		return nil, fmt.Errorf("unsupported API schema: backend=%s", schema)
 	}

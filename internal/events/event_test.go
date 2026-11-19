@@ -31,6 +31,7 @@ func TestRequestEventJSON(t *testing.T) {
 		Backend:            "openai",
 		BackendName:        "default/vllm-pool/route/my-route/rule/0/ref/0",
 		Success:            true,
+		HTTPStatusCode:     200,
 		LatencyMs:          320.5,
 		Stream:             true,
 		TimeToFirstTokenMs: 85.2,
@@ -59,6 +60,7 @@ func TestRequestEventJSON(t *testing.T) {
 	require.Equal(t, event.SelectedPool, decoded.SelectedPool)
 	require.Equal(t, event.ModelNameOverride, decoded.ModelNameOverride)
 	require.True(t, decoded.Success)
+	require.Equal(t, 200, decoded.HTTPStatusCode)
 	require.Equal(t, uint32(150), decoded.Tokens.InputTokens)
 	require.Equal(t, uint32(250), decoded.Tokens.OutputTokens)
 	require.Equal(t, uint32(400), decoded.Tokens.TotalTokens)
@@ -91,7 +93,53 @@ func TestRequestEventJSON_OmitEmpty(t *testing.T) {
 	require.NotContains(t, raw, "model_name_override")
 	require.NotContains(t, raw, "backend_name")
 	require.NotContains(t, raw, "headers")
+	require.NotContains(t, raw, "http_status_code")
 	require.Contains(t, raw, "error_type")
+}
+
+func TestPublisherStateIncludesHTTPStatusCode(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 0)
+	state.SetHTTPStatusCode(503)
+
+	event := state.buildEvent(false, "backend_error", nil, 12, 0, 0, nil)
+	require.Equal(t, 503, event.HTTPStatusCode)
+}
+
+func TestPublisherStateBuildsBoundedBackendErrorDetail(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 0)
+	state.SetBackendError([]byte(`{"error":{"message":"invalid tool schema: token=secret-value","type":"invalid_request_error","code":"bad_tool","param":"tools[0]"}}`), map[string]string{
+		"x-request-id": "backend-req-123",
+	})
+
+	event := state.buildEvent(false, "backend_error", nil, 12, 0, 0, nil)
+	require.Equal(t, &BackendErrorDetail{
+		Message:          "invalid tool schema: token=[REDACTED]",
+		Type:             "invalid_request_error",
+		Code:             "bad_tool",
+		Param:            "tools[0]",
+		BackendRequestID: "backend-req-123",
+	}, event.BackendErrorDetail)
+}
+
+func TestPublisherStateBoundsBackendErrorDetail(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 0)
+	state.SetBackendError([]byte(`{"message":"`+strings.Repeat("x", backendErrorFieldMaxBytes+10)+`"}`), nil)
+
+	event := state.buildEvent(false, "backend_error", nil, 12, 0, 0, nil)
+	require.Len(t, event.BackendErrorDetail.Message, backendErrorFieldMaxBytes)
+	require.True(t, event.BackendErrorDetail.Truncated)
+}
+
+func TestPublisherStateOmitsUnstructuredBackendError(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 0)
+	state.SetBackendError([]byte("private unstructured response"), nil)
+
+	event := state.buildEvent(false, "backend_error", nil, 12, 0, 0, nil)
+	require.Nil(t, event.BackendErrorDetail)
 }
 
 func TestPublisherStateDirectHTTP(t *testing.T) {
@@ -145,18 +193,41 @@ func TestPublisherStateBuildsSanitizedRequestAudit(t *testing.T) {
 	require.NotNil(t, event.RequestAudit)
 	require.False(t, event.RequestAudit.Truncated)
 	require.NotContains(t, event.RequestAudit.Body, "messages")
+	require.NotContains(t, event.RequestAudit.Body, "tools")
 	require.Equal(t, "demo", event.RequestAudit.Body["model"])
 	require.Equal(t, float64(128), event.RequestAudit.Body["max_tokens"])
 	require.Len(t, event.RequestAudit.ToolCalls, 1)
-	require.Equal(t, ToolCallAudit{
-		ID: "call-1", Type: "function", Name: "read", Arguments: `{"path":"/tmp/a"}`,
-	}, event.RequestAudit.ToolCalls[0])
+	require.Equal(t, ToolCallAudit{ID: "call-1", Type: "function", Name: "read"}, event.RequestAudit.ToolCalls[0])
+	require.Equal(t, &MessageAudit{
+		MessageCount: 3, RoleSequence: []string{"user", "assistant", "tool"},
+	}, event.MessageAudit)
 
 	encoded, err := json.Marshal(event.RequestAudit)
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "private prompt")
 	require.NotContains(t, string(encoded), "private answer")
 	require.NotContains(t, string(encoded), "private tool result")
+	require.NotContains(t, string(encoded), `/tmp/a`)
+}
+
+func TestPublisherStateBuildsInvalidMessageOrderAuditWithoutContent(t *testing.T) {
+	t.Parallel()
+	state := newPublisherState("chat", 0)
+	state.SetRequestBody([]byte(`{"messages":[{"role":"system","content":"secret-a"},{"role":"user","content":"secret-b"},{"role":"system","content":"secret-c"}]}`))
+	state.SetUpstreamRequestBody([]byte(`{"messages":[{"role":"system","content":"upstream-secret-a"},{"role":"user","content":"upstream-secret-b"},{"role":"system","content":"upstream-secret-c"}]}`))
+	event := state.buildEvent(false, "backend_error", nil, 1, 0, 0, nil)
+	require.Equal(t, &MessageAudit{
+		MessageCount: 3, RoleSequence: []string{"system", "user", "system"},
+		SystemMessageCount: 2, SystemMessagePositions: []int{0, 2}, InvalidMessageOrder: true,
+	}, event.MessageAudit)
+	require.Equal(t, event.MessageAudit, event.UpstreamMessageAudit)
+	raw, err := json.Marshal(event)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "secret-a")
+	require.NotContains(t, string(raw), "secret-b")
+	require.NotContains(t, string(raw), "secret-c")
+	require.NotContains(t, string(raw), "upstream-secret")
+	require.NotContains(t, string(raw), `"content"`)
 }
 
 func TestPublisherStateBuildsContentFreeParseFailureDiagnostic(t *testing.T) {
@@ -200,7 +271,7 @@ func TestPublisherStateBuildsContentFreeParseFailureDiagnostic(t *testing.T) {
 	require.NotContains(t, string(encoded), "secret")
 }
 
-func TestPublisherStateExtractsResponsesAndAnthropicToolArguments(t *testing.T) {
+func TestPublisherStateExtractsResponsesAndAnthropicToolMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
@@ -211,12 +282,12 @@ func TestPublisherStateExtractsResponsesAndAnthropicToolArguments(t *testing.T) 
 		{
 			name: "responses function call", operation: "responses",
 			body: `{"model":"demo","input":[{"type":"message","content":"private"},{"type":"function_call","call_id":"call-r","name":"lookup","arguments":"{\"id\":7}"}]}`,
-			want: ToolCallAudit{ID: "call-r", Type: "function_call", Name: "lookup", Arguments: `{"id":7}`},
+			want: ToolCallAudit{ID: "call-r", Type: "function_call", Name: "lookup"},
 		},
 		{
 			name: "anthropic tool use", operation: "messages",
 			body: `{"model":"demo","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"shell","input":{"command":"date"}}]}]}`,
-			want: ToolCallAudit{ID: "tool-a", Type: "tool_use", Name: "shell", Arguments: `{"command":"date"}`},
+			want: ToolCallAudit{ID: "tool-a", Type: "tool_use", Name: "shell"},
 		},
 	}
 	for _, test := range tests {

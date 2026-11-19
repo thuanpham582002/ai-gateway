@@ -300,7 +300,11 @@ func TestRerankEndpointSpec_GetTranslator(t *testing.T) {
 	_, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaCohere}, "override")
 	require.NoError(t, err)
 
+	// vLLM rerankers accept Cohere-shaped requests on the OpenAI /v1/rerank path.
 	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "override")
+	require.NoError(t, err)
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSBedrock}, "override")
 	require.ErrorContains(t, err, "unsupported API schema")
 }
 

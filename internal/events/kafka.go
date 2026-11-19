@@ -8,195 +8,327 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/IBM/sarama"
+	"go.opentelemetry.io/otel/metric"
 )
 
-// KafkaConfig holds Kafka producer configuration.
+const (
+	defaultOutboxMaxBytes   = int64(1 << 30)
+	defaultOutboxMaxRecords = int64(1_000_000)
+	defaultRetryMin         = 500 * time.Millisecond
+	defaultRetryMax         = 30 * time.Second
+)
+
+// KafkaConfig holds Kafka producer and durable outbox configuration.
 type KafkaConfig struct {
-	Brokers       []string
-	Topic         string
-	SASLUser      string
-	SASLPassword  string
-	SASLMechanism string // "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
-	TLSEnabled    bool
-	TLSCABundle   string
-	TLSCAPEM      string
-	// BodyCaptureMaxBytes controls inline capture per request/response body. Zero stores hashes only.
+	Brokers             []string
+	Topic               string
+	SASLUser            string
+	SASLPassword        string
+	SASLMechanism       string
+	TLSEnabled          bool
+	TLSCABundle         string
+	TLSCAPEM            string
 	BodyCaptureMaxBytes int
-	// SpoolDir persists unacknowledged events for replay after a producer process restart.
-	SpoolDir string
-	// BodyStore receives complete bodies that exceed BodyCaptureMaxBytes.
-	BodyStore BodyStore
+	SpoolDir            string
+	OutboxMaxBytes      int64
+	OutboxMaxRecords    int64
+	BodyStore           BodyStore
+	Meter               metric.Meter
 }
 
-// kafkaFactory implements Factory using sarama.AsyncProducer.
+type kafkaSyncProducer interface {
+	SendMessage(*sarama.ProducerMessage) (int32, int64, error)
+	Close() error
+}
+
+type kafkaProducerFactory func() (kafkaSyncProducer, error)
+
 type kafkaFactory struct {
-	producer            sarama.AsyncProducer
 	topic               string
-	headerKeys          map[string]bool // which request headers to include in events
+	headerKeys          map[string]bool
 	bodyCaptureMaxBytes int
-	spoolDir            string
 	bodyStore           BodyStore
 	logger              *slog.Logger
+	outbox              *durableOutbox
+	metrics             *outboxMetrics
+	newProducer         kafkaProducerFactory
+	wake                chan struct{}
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	shipperWG           sync.WaitGroup
 	publishWG           sync.WaitGroup
 }
 
-// NewKafkaFactory creates a Factory backed by Kafka.
-// Returns the factory, a shutdown function to flush and close the producer, and any error.
+// NewKafkaFactory opens the durable outbox and starts a reconnecting shipper.
+// Kafka connectivity is deliberately not required for gateway startup.
 func NewKafkaFactory(cfg KafkaConfig, headerKeys []string, logger *slog.Logger) (Factory, func(), error) {
+	producerConfig, err := newSaramaProducerConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newKafkaFactory(cfg, headerKeys, logger, func() (kafkaSyncProducer, error) {
+		return sarama.NewSyncProducer(cfg.Brokers, producerConfig)
+	})
+}
+
+func newKafkaFactory(cfg KafkaConfig, headerKeys []string, logger *slog.Logger, producerFactory kafkaProducerFactory) (Factory, func(), error) {
+	if cfg.OutboxMaxBytes == 0 {
+		cfg.OutboxMaxBytes = defaultOutboxMaxBytes
+	}
+	if cfg.OutboxMaxRecords == 0 {
+		cfg.OutboxMaxRecords = defaultOutboxMaxRecords
+	}
+	outbox, err := openDurableOutbox(cfg.SpoolDir, cfg.OutboxMaxBytes, cfg.OutboxMaxRecords)
+	if err != nil {
+		return nil, nil, err
+	}
+	hk := make(map[string]bool, len(headerKeys))
+	for _, key := range headerKeys {
+		if key = strings.TrimSpace(strings.ToLower(key)); key != "" {
+			hk[key] = true
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &kafkaFactory{
+		topic: cfg.Topic, headerKeys: hk, bodyCaptureMaxBytes: cfg.BodyCaptureMaxBytes,
+		bodyStore: cfg.BodyStore, logger: logger, outbox: outbox,
+		metrics: newOutboxMetrics(cfg.Meter, outbox), newProducer: producerFactory,
+		wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel,
+	}
+	f.shipperWG.Add(1)
+	go f.runShipper()
+	f.signalShipper()
+	shutdown := func() {
+		f.cancel()
+		f.publishWG.Wait()
+		f.shipperWG.Wait()
+		if err := f.outbox.close(); err != nil {
+			f.logger.Error("failed to close kafka event outbox", slog.Any("error", err))
+		}
+	}
+	return f, shutdown, nil
+}
+
+func newSaramaProducerConfig(cfg KafkaConfig) (*sarama.Config, error) {
 	saramaCfg := sarama.NewConfig()
 	saramaCfg.Producer.Return.Errors = true
 	saramaCfg.Producer.Return.Successes = true
 	saramaCfg.Producer.Compression = sarama.CompressionSnappy
 	saramaCfg.Producer.RequiredAcks = sarama.WaitForAll
 	saramaCfg.Producer.Idempotent = true
-	saramaCfg.Producer.Retry.Max = 5
+	saramaCfg.Producer.Retry.Max = 3
 	saramaCfg.Net.MaxOpenRequests = 1
-
+	saramaCfg.Net.DialTimeout = 10 * time.Second
+	saramaCfg.Net.ReadTimeout = 10 * time.Second
+	saramaCfg.Net.WriteTimeout = 10 * time.Second
 	if cfg.TLSEnabled {
 		tlsConfig, err := tlsConfigWithAdditionalCA(cfg.TLSCABundle, cfg.TLSCAPEM)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure Kafka TLS: %w", err)
+			return nil, fmt.Errorf("configure Kafka TLS: %w", err)
 		}
 		saramaCfg.Net.TLS.Enable = true
 		saramaCfg.Net.TLS.Config = tlsConfig
 	}
+	configureSASL(saramaCfg, cfg)
+	return saramaCfg, nil
+}
 
-	if cfg.SASLUser != "" {
-		saramaCfg.Net.SASL.Enable = true
-		saramaCfg.Net.SASL.User = cfg.SASLUser
-		saramaCfg.Net.SASL.Password = cfg.SASLPassword
-		switch cfg.SASLMechanism {
-		case "SCRAM-SHA-256":
-			saramaCfg.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256
-			saramaCfg.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
-		case "SCRAM-SHA-512":
-			saramaCfg.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
-			saramaCfg.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
-		default:
-			saramaCfg.Net.SASL.Mechanism = sarama.SASLTypePlaintext
-		}
+func configureSASL(config *sarama.Config, cfg KafkaConfig) {
+	if cfg.SASLUser == "" {
+		return
 	}
-
-	if err := prepareSpoolDir(cfg.SpoolDir); err != nil {
-		return nil, nil, err
+	config.Net.SASL.Enable = true
+	config.Net.SASL.User = cfg.SASLUser
+	config.Net.SASL.Password = cfg.SASLPassword
+	switch cfg.SASLMechanism {
+	case "SCRAM-SHA-256":
+		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256
+		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
+	case "SCRAM-SHA-512":
+		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
+		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
+	default:
+		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
 	}
-
-	producer, err := sarama.NewAsyncProducer(cfg.Brokers, saramaCfg)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	hk := make(map[string]bool, len(headerKeys))
-	for _, k := range headerKeys {
-		if k = strings.TrimSpace(strings.ToLower(k)); k != "" {
-			hk[k] = true
-		}
-	}
-
-	f := &kafkaFactory{
-		producer:            producer,
-		topic:               cfg.Topic,
-		headerKeys:          hk,
-		bodyCaptureMaxBytes: cfg.BodyCaptureMaxBytes,
-		spoolDir:            cfg.SpoolDir,
-		bodyStore:           cfg.BodyStore,
-		logger:              logger,
-	}
-
-	go f.drainProducerResults()
-	if err := f.replaySpooledEvents(); err != nil {
-		_ = producer.Close()
-		return nil, nil, err
-	}
-
-	shutdown := func() {
-		f.publishWG.Wait()
-		if err := producer.Close(); err != nil {
-			f.logger.Error("failed to close kafka producer", slog.Any("error", err))
-		}
-	}
-
-	return f, shutdown, nil
 }
 
 func (f *kafkaFactory) NewPublisher(operation string) Publisher {
-	return &kafkaPublisher{
-		factory:        f,
-		publisherState: newPublisherStateWithBodyStore(operation, f.bodyCaptureMaxBytes, f.bodyStore),
-	}
+	return &kafkaPublisher{factory: f, publisherState: newPublisherStateWithBodyStore(operation, f.bodyCaptureMaxBytes, f.bodyStore)}
 }
 
-// kafkaPublisher implements Publisher for a single request.
 type kafkaPublisher struct {
 	factory *kafkaFactory
 	*publisherState
 }
 
-// Publish emits the accumulated event to Kafka asynchronously.
+// Publish durably enqueues the event. Kafka network I/O never runs on the request path.
 func (p *kafkaPublisher) Publish(_ context.Context, success bool, errorType string, tokens *TokenInfo, latencyMs, ttftMs, itlMs float64) {
 	event := p.buildEvent(success, errorType, tokens, latencyMs, ttftMs, itlMs, p.factory.headerKeys)
-	if p.factory.bodyStore == nil {
-		p.publishEvent(event, "")
+	data, err := json.Marshal(event)
+	if err != nil {
+		p.factory.recordAppendFailure("marshal", err, event.EventID)
 		return
 	}
-	spoolPath := p.spoolPendingUpload(event)
+	ready := p.factory.bodyStore == nil
+	if !ready {
+		markExternalBodiesPending(event)
+		data, err = json.Marshal(event)
+		if err != nil {
+			p.factory.recordAppendFailure("marshal_pending", err, event.EventID)
+			return
+		}
+	}
+	sequence, err := p.factory.outbox.enqueue(event.EventID, event.RequestID, data, ready)
+	if err != nil {
+		p.factory.recordAppendFailure("enqueue", err, event.EventID)
+		return
+	}
+	p.factory.metrics.recordEnqueued()
+	if ready {
+		p.factory.signalShipper()
+		return
+	}
 	p.factory.publishWG.Add(1)
 	go func() {
 		defer p.factory.publishWG.Done()
-		for _, failure := range p.storeExternalBodies(context.Background(), event) {
-			p.factory.logger.Error("failed to store complete event body",
-				slog.Any("error", failure.err), slog.String("body_kind", failure.kind), slog.String("event_id", event.EventID))
+		for _, failure := range p.storeExternalBodies(p.factory.ctx, event) {
+			p.factory.logger.Error("failed to store complete event body", slog.Any("error", failure.err), slog.String("body_kind", failure.kind), slog.String("event_id", event.EventID))
 		}
-		p.publishEvent(event, spoolPath)
+		finalData, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			p.factory.recordAppendFailure("marshal_uploaded", marshalErr, event.EventID)
+			return
+		}
+		if updateErr := p.factory.outbox.update(sequence, finalData, true); updateErr != nil {
+			p.factory.recordAppendFailure("update_uploaded", updateErr, event.EventID)
+			if readyErr := p.factory.outbox.markReady(sequence); readyErr != nil {
+				p.factory.recordAppendFailure("mark_pending_ready", readyErr, event.EventID)
+				return
+			}
+		}
+		p.factory.signalShipper()
 	}()
 }
 
-func (p *kafkaPublisher) spoolPendingUpload(event *RequestEvent) string {
-	if p.factory.spoolDir == "" {
-		return ""
+func (f *kafkaFactory) runShipper() {
+	defer f.shipperWG.Done()
+	var producer kafkaSyncProducer
+	defer func() {
+		if producer != nil {
+			_ = producer.Close()
+		}
+	}()
+	backoff := defaultRetryMin
+	for {
+		item, err := f.outbox.peekReady()
+		var corrupt *corruptOutboxRecordError
+		if errors.As(err, &corrupt) {
+			f.logger.Error("quarantining corrupt kafka event outbox record", slog.Any("error", err))
+			f.metrics.recordReplayFailure()
+			if quarantineErr := f.outbox.quarantine(corrupt.sequence); quarantineErr != nil {
+				f.logger.Error("failed to quarantine corrupt kafka event outbox record", slog.Any("error", quarantineErr))
+				if !f.waitRetry(backoff) {
+					return
+				}
+				backoff = nextBackoff(backoff)
+			}
+			continue
+		}
+		if err != nil {
+			f.logger.Error("failed to read kafka event outbox", slog.Any("error", err))
+			f.metrics.recordReplayFailure()
+			if !f.waitRetry(backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		if item == nil {
+			select {
+			case <-f.ctx.Done():
+				return
+			case <-f.wake:
+			}
+			continue
+		}
+		if producer == nil {
+			producer, err = f.newProducer()
+			if err != nil {
+				f.logger.Warn("kafka unavailable; durable outbox retained", slog.Any("error", err))
+				f.metrics.recordReplayFailure()
+				if !f.waitRetry(backoff) {
+					return
+				}
+				backoff = nextBackoff(backoff)
+				continue
+			}
+		}
+		started := time.Now()
+		_, _, err = producer.SendMessage(&sarama.ProducerMessage{Topic: f.topic, Key: sarama.StringEncoder(item.record.Key), Value: sarama.ByteEncoder(item.record.Value)})
+		if err != nil {
+			f.logger.Warn("kafka publish failed; durable outbox retained", slog.Any("error", err), slog.String("event_id", item.record.EventID))
+			f.metrics.recordReplayFailure()
+			_ = producer.Close()
+			producer = nil
+			if !f.waitRetry(backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		if err = f.outbox.acknowledge(item.sequence); err != nil {
+			f.logger.Error("failed to acknowledge kafka event outbox record", slog.Any("error", err), slog.String("event_id", item.record.EventID))
+			f.metrics.recordReplayFailure()
+			if !f.waitRetry(backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		f.metrics.recordAcknowledged(time.Since(started))
+		backoff = defaultRetryMin
 	}
-	markExternalBodiesPending(event)
-	data, err := json.Marshal(event)
-	if err != nil {
-		p.factory.logger.Error("failed to marshal pending S3 event", slog.Any("error", err))
-		return ""
-	}
-	spoolPath, err := writeSpoolRecord(p.factory.spoolDir, event.EventID, event.RequestID, data)
-	if err != nil {
-		p.factory.logger.Error("failed to spool pending S3 event", slog.Any("error", err), slog.String("event_id", event.EventID))
-		return ""
-	}
-	return spoolPath
 }
 
-func (p *kafkaPublisher) publishEvent(event *RequestEvent, spoolPath string) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		p.factory.logger.Error("failed to marshal event", slog.Any("error", err))
-		return
+func (f *kafkaFactory) waitRetry(base time.Duration) bool {
+	jitter := time.Duration(rand.Float64() * float64(base) / 2)
+	timer := time.NewTimer(base + jitter)
+	defer timer.Stop()
+	select {
+	case <-f.ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
+}
 
-	message := &sarama.ProducerMessage{
-		Topic: p.factory.topic,
-		Key:   sarama.StringEncoder(event.RequestID),
-		Value: sarama.ByteEncoder(data),
+func nextBackoff(current time.Duration) time.Duration {
+	if current >= defaultRetryMax/2 {
+		return defaultRetryMax
 	}
-	if p.factory.spoolDir != "" {
-		finalSpoolPath, err := writeSpoolRecord(p.factory.spoolDir, event.EventID, event.RequestID, data)
-		if err != nil {
-			p.factory.logger.Error("failed to spool kafka event", slog.Any("error", err), slog.String("event_id", event.EventID))
-		} else {
-			spoolPath = finalSpoolPath
-		}
+	return current * 2
+}
+
+func (f *kafkaFactory) signalShipper() {
+	select {
+	case f.wake <- struct{}{}:
+	default:
 	}
-	if spoolPath != "" {
-		message.Metadata = spoolPath
+}
+
+func (f *kafkaFactory) recordAppendFailure(stage string, err error, eventID string) {
+	f.logger.Error("failed to append kafka event to durable outbox", slog.String("stage", stage), slog.Any("error", err), slog.String("event_id", eventID))
+	f.metrics.recordAppendFailure()
+	if errors.Is(err, errOutboxFull) {
+		f.metrics.recordDropped()
 	}
-	p.factory.producer.Input() <- message
 }

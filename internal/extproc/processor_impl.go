@@ -377,6 +377,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		logger = r.logger
 	}
 
+	// Emit privacy-safe multimodal metadata at INFO from the original client body.
+	// This intentionally runs before any route/backend body mutation.
+	logSafeMultimodalRequest(logger, r.inboundRequestBodyRaw)
+
 	// Only log parsed request body when redaction is enabled
 	if r.debugLogEnabled && r.enableRedaction {
 		if redactedBody, err := r.eh.RedactSensitiveInfoFromRequest(body); err != nil {
@@ -718,6 +722,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	}()
 
 	u.responseHeaders = headersToMap(headers)
+	if u.events != nil {
+		if code, parseErr := strconv.Atoi(u.responseHeaders[":status"]); parseErr == nil {
+			u.events.SetHTTPStatusCode(code)
+		}
+	}
 	if enc := u.responseHeaders["content-encoding"]; enc != "" {
 		u.responseEncoding = enc
 	}
@@ -803,6 +812,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 				responseBody = transformed
 			}
 			u.events.ObserveResponseBody(responseBody)
+			u.events.SetBackendError(responseBody, u.responseHeaders)
 			responseBodyObserved = true
 		}
 		if u.parent.span != nil {

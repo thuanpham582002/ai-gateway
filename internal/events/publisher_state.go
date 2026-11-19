@@ -7,7 +7,9 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,28 +17,32 @@ import (
 )
 
 type publisherState struct {
-	runID               string
-	requestID           string
-	operation           string
-	originalModel       string
-	requestModel        string
-	responseModel       string
-	backend             string
-	backendName         string
-	selectedPool        string
-	modelNameOverride   string
-	stream              bool
-	headers             map[string]string
-	bodyCaptureMaxBytes int
-	bodyStore           BodyStore
-	requestBody         *bodyCapture
-	requestAudit        *RequestAudit
-	parseFailure        *ParseFailureInfo
-	upstreamRequestBody *bodyCapture
-	responseBody        *bodyCapture
-	responseMetadata    []byte
-	client              *ClientInfo
-	correlation         *CorrelationInfo
+	runID                string
+	requestID            string
+	operation            string
+	originalModel        string
+	requestModel         string
+	responseModel        string
+	backend              string
+	backendName          string
+	selectedPool         string
+	modelNameOverride    string
+	stream               bool
+	httpStatusCode       int
+	backendErrorDetail   *BackendErrorDetail
+	headers              map[string]string
+	bodyCaptureMaxBytes  int
+	bodyStore            BodyStore
+	requestBody          *bodyCapture
+	requestAudit         *RequestAudit
+	messageAudit         *MessageAudit
+	upstreamMessageAudit *MessageAudit
+	parseFailure         *ParseFailureInfo
+	upstreamRequestBody  *bodyCapture
+	responseBody         *bodyCapture
+	responseMetadata     []byte
+	client               *ClientInfo
+	correlation          *CorrelationInfo
 }
 
 func newPublisherState(operation string, bodyCaptureMaxBytes int) *publisherState {
@@ -61,7 +67,90 @@ func (p *publisherState) SetBackendName(name string)        { p.backendName = na
 func (p *publisherState) SetSelectedPool(pool string)       { p.selectedPool = pool }
 func (p *publisherState) SetModelNameOverride(value string) { p.modelNameOverride = value }
 func (p *publisherState) SetStream(stream bool)             { p.stream = stream }
-func (p *publisherState) RunID() string                     { return p.runID }
+func (p *publisherState) SetHTTPStatusCode(code int)        { p.httpStatusCode = code }
+
+const backendErrorFieldMaxBytes = 512
+
+var backendErrorSecretPattern = regexp.MustCompile(`(?i)(bearer\s+|api[_-]?key[=: ]+|authorization[=: ]+|password[=: ]+|token[=: ]+)[^\s,;\"}]+`)
+
+func (p *publisherState) SetBackendError(body []byte, headers map[string]string) {
+	detail := parseBackendErrorDetail(body)
+	for _, key := range []string{"x-request-id", "x-backend-request-id", "request-id", "x-amzn-requestid"} {
+		if value := strings.TrimSpace(headers[key]); value != "" {
+			detail.BackendRequestID, _ = boundedBackendErrorField(value)
+			break
+		}
+	}
+	if detail.Message == "" && detail.Type == "" && detail.Code == "" && detail.Param == "" && detail.BackendRequestID == "" {
+		return
+	}
+	p.backendErrorDetail = detail
+}
+
+func parseBackendErrorDetail(body []byte) *BackendErrorDetail {
+	var envelope map[string]any
+	if json.Unmarshal(body, &envelope) != nil {
+		return &BackendErrorDetail{}
+	}
+	source := envelope
+	if nested, ok := envelope["error"].(map[string]any); ok {
+		source = nested
+	}
+	detail := &BackendErrorDetail{}
+	for _, item := range []struct {
+		keys   []string
+		target *string
+	}{
+		{[]string{"message", "detail", "error"}, &detail.Message},
+		{[]string{"type", "error_type"}, &detail.Type},
+		{[]string{"code", "error_code"}, &detail.Code},
+		{[]string{"param"}, &detail.Param},
+	} {
+		for _, key := range item.keys {
+			value, ok := source[key]
+			if !ok {
+				value, ok = envelope[key]
+			}
+			if !ok {
+				continue
+			}
+			text, ok := scalarErrorField(value)
+			if !ok {
+				continue
+			}
+			*item.target, ok = boundedBackendErrorField(text)
+			detail.Truncated = detail.Truncated || ok
+			break
+		}
+	}
+	return detail
+}
+
+func scalarErrorField(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case float64, bool:
+		return fmt.Sprint(typed), true
+	default:
+		return "", false
+	}
+}
+
+func boundedBackendErrorField(value string) (string, bool) {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	value = backendErrorSecretPattern.ReplaceAllString(value, "${1}[REDACTED]")
+	if len(value) <= backendErrorFieldMaxBytes {
+		return value, false
+	}
+	return value[:backendErrorFieldMaxBytes], true
+}
+func (p *publisherState) RunID() string { return p.runID }
 
 func (p *publisherState) SetRequestHeaders(headers map[string]string) {
 	p.headers = make(map[string]string, len(headers))
@@ -73,6 +162,7 @@ func (p *publisherState) SetRequestHeaders(headers map[string]string) {
 
 func (p *publisherState) SetRequestBody(body []byte) {
 	p.requestAudit = buildRequestAudit(body)
+	p.messageAudit = buildMessageAudit(body)
 	p.requestBody = newBodyCaptureWithExternalStore(p.bodyCaptureMaxBytes, p.externalBodyMaxBytes())
 	p.requestBody.write(body)
 	p.extractNativeMetadata(body)
@@ -88,6 +178,7 @@ func (p *publisherState) SetRequestParseFailure(body []byte, message string) {
 }
 
 func (p *publisherState) SetUpstreamRequestBody(body []byte) {
+	p.upstreamMessageAudit = buildMessageAudit(body)
 	p.upstreamRequestBody = newBodyCaptureWithExternalStore(p.bodyCaptureMaxBytes, p.externalBodyMaxBytes())
 	p.upstreamRequestBody.write(body)
 }
@@ -117,40 +208,44 @@ func (p *publisherState) buildEvent(success bool, errorType string, tokens *Toke
 		upstreamRequestBody.Content = ""
 	}
 	return &RequestEvent{
-		SchemaVersion:       1,
-		EventID:             uuid.NewString(),
-		RunID:               p.runID,
-		EventType:           eventType,
-		Timestamp:           time.Now(),
-		RequestID:           requestID,
-		Operation:           p.operation,
-		Protocol:            protocolFromOperation(p.operation),
-		Transport:           transportForStream(p.stream),
-		Client:              p.client,
-		ConversationKey:     conversationKey(p.correlation),
-		Correlation:         p.correlation,
-		OriginalModel:       p.originalModel,
-		RequestModel:        p.requestModel,
-		ResponseModel:       p.responseModel,
-		Backend:             p.backend,
-		BackendName:         p.backendName,
-		Success:             success,
-		ErrorType:           errorType,
-		LatencyMs:           latencyMs,
-		Tokens:              tokens,
-		Stream:              p.stream,
-		TimeToFirstTokenMs:  ttftMs,
-		InterTokenLatencyMs: itlMs,
-		Billing:             billingInfo(p.headers),
-		CapturePolicy:       capturePolicy(p.bodyCaptureMaxBytes, p.bodyStore),
-		Headers:             filterEventHeaders(p.headers, headerKeys),
-		SelectedPool:        p.selectedPool,
-		ModelNameOverride:   p.modelNameOverride,
-		RequestAudit:        p.requestAudit,
-		ParseFailure:        p.parseFailure,
-		RequestBody:         requestBody,
-		UpstreamRequestBody: upstreamRequestBody,
-		ResponseBody:        p.responseBody.snapshot(),
+		SchemaVersion:        1,
+		EventID:              uuid.NewString(),
+		RunID:                p.runID,
+		EventType:            eventType,
+		Timestamp:            time.Now(),
+		RequestID:            requestID,
+		Operation:            p.operation,
+		Protocol:             protocolFromOperation(p.operation),
+		Transport:            transportForStream(p.stream),
+		Client:               p.client,
+		ConversationKey:      conversationKey(p.correlation),
+		Correlation:          p.correlation,
+		OriginalModel:        p.originalModel,
+		RequestModel:         p.requestModel,
+		ResponseModel:        p.responseModel,
+		Backend:              p.backend,
+		BackendName:          p.backendName,
+		Success:              success,
+		ErrorType:            errorType,
+		HTTPStatusCode:       p.httpStatusCode,
+		BackendErrorDetail:   p.backendErrorDetail,
+		LatencyMs:            latencyMs,
+		Tokens:               tokens,
+		Stream:               p.stream,
+		TimeToFirstTokenMs:   ttftMs,
+		InterTokenLatencyMs:  itlMs,
+		Billing:              billingInfo(p.headers),
+		CapturePolicy:        capturePolicy(p.bodyCaptureMaxBytes, p.bodyStore),
+		Headers:              filterEventHeaders(p.headers, headerKeys),
+		SelectedPool:         p.selectedPool,
+		ModelNameOverride:    p.modelNameOverride,
+		RequestAudit:         p.requestAudit,
+		MessageAudit:         p.messageAudit,
+		UpstreamMessageAudit: p.upstreamMessageAudit,
+		ParseFailure:         p.parseFailure,
+		RequestBody:          requestBody,
+		UpstreamRequestBody:  upstreamRequestBody,
+		ResponseBody:         p.responseBody.snapshot(),
 	}
 }
 

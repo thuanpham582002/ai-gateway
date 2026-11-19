@@ -142,7 +142,9 @@ Set via Helm `extProc.extraEnvVars`. These are read by ExtProc at startup as fal
 | `KAFKA_TOPIC` | `ai-gateway-events` | Kafka topic name for events |
 | `KAFKA_EVENT_HEADER_KEYS` | `""` | Comma-separated request header keys to include. Empty = include no raw headers. Native Codex and Claude correlation fields are extracted separately. |
 | `KAFKA_EVENT_BODY_MAX_BYTES` | `0` | Maximum inline bytes captured for each inbound request, upstream request, and response body. Zero emits only SHA-256 and byte count. |
-| `KAFKA_EVENT_SPOOL_DIR` | `""` | Optional directory for fsynced native Kafka events. Records are replayed after an ExtProc process restart and removed only after broker acknowledgement. |
+| `KAFKA_EVENT_SPOOL_DIR` | `""` | Required directory for the native Kafka transactional outbox. The directory must use storage that survives pod replacement. |
+| `KAFKA_EVENT_OUTBOX_MAX_BYTES` | `1073741824` | Maximum logical bytes retained by the outbox. New events are dropped with a metric and error log when full. |
+| `KAFKA_EVENT_OUTBOX_MAX_RECORDS` | `1000000` | Maximum records retained by the outbox. |
 | `KAFKA_EVENT_S3_BUCKET` | `""` (disabled) | S3-compatible bucket for complete bodies that exceed the inline limit. Supports AWS S3, SeaweedFS, MinIO, and compatible implementations. |
 | `KAFKA_EVENT_S3_ENDPOINT` | AWS endpoint | Optional custom S3 endpoint URL, including `https://` or `http://`. |
 | `KAFKA_EVENT_S3_REGION` | `us-east-1` | SigV4 signing region. |
@@ -172,6 +174,8 @@ extproc \
   -kafkaEventHeaderKeys=x-project-id,x-model-id \
   -kafkaEventBodyMaxBytes=262144 \
   -kafkaEventSpoolDir=/var/lib/ai-gateway/events \
+  -kafkaEventOutboxMaxBytes=536870912 \
+  -kafkaEventOutboxMaxRecords=500000 \
   -kafkaEventS3Bucket=ai-gateway-audit \
   -kafkaEventS3Endpoint=https://s3.seaweedfs.internal \
   -kafkaEventS3UsePathStyle=true \
@@ -226,11 +230,15 @@ Only bodies whose inline content is truncated are uploaded. Object keys have the
 
 The S3 client uses SigV4 and path-style endpoints when configured, making the same implementation suitable for SeaweedFS in managed environments and MinIO in development. Optional `AES256` and `aws:kms` headers are passed through only when supported by the target service.
 
-### Crash Replay
+### Durable Outbox And Crash Replay
 
-`KAFKA_EVENT_SPOOL_DIR` enables an atomic, fsynced spool for the native Kafka producer. The producer writes the event before enqueueing it, retains it when retries are exhausted, replays it at startup with the same `event_id`, and removes it only after Kafka acknowledgement. A crash after broker acknowledgement but before local deletion can produce a duplicate; consumers should deduplicate on `event_id`.
+The native Kafka publisher always writes each event to a bbolt transaction before returning from `Publish`. Kafka connections, retries, and acknowledgements run in a background shipper, so an unavailable broker cannot block the request path. The shipper opens Kafka lazily, retries with bounded exponential backoff, and removes a record only after broker acknowledgement.
 
-The live deployment uses the ExtProc UDS `emptyDir`, which survives a container restart but not pod deletion or node loss. Use a per-pod persistent volume or an external outbox when those failures must also be durable. Kafka REST publishing does not support the local spool.
+Delivery is at least once. A crash after Kafka acknowledgement but before the local delete transaction can produce a duplicate, so consumers must deduplicate on `event_id`. Records that were waiting for an S3 body upload are promoted on restart with their durable `upload_pending` snapshot rather than being stranded. Invalid records are moved to the outbox quarantine bucket so later records can continue.
+
+The outbox is bounded by both bytes and record count. Capacity exhaustion uses a fail-open policy for inference: the audit event is dropped, an error is logged, and `aigateway_kafka_outbox_dropped` is incremented. Alert on any drop and on sustained growth in `aigateway_kafka_outbox_records`, `aigateway_kafka_outbox_bytes`, or `aigateway_kafka_outbox_oldest_record_age_seconds`.
+
+The outbox directory must not be the ExtProc UDS `emptyDir`. Mount persistent storage at `KAFKA_EVENT_SPOOL_DIR`. Node-local retained storage protects Kafka outages, container restarts, pod replacement, and rollouts on the same node, but not permanent node or disk loss. Use replicated persistent storage or an external outbox when node-loss durability is required. Kafka REST publishing does not support this outbox.
 
 ## Event Schema
 
