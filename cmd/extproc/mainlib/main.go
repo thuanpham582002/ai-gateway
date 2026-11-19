@@ -622,6 +622,8 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		translationMetricsFactory, eventFactory, "translation", tracing.TranslationTracer(), endpointspec.TranslationEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/images/generations"), extproc.NewFactory(
 		imageGenerationMetricsFactory, eventFactory, "image_generation", tracing.ImageGenerationTracer(), endpointspec.ImageGenerationEndpointSpec{}))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/rerank"), extproc.NewFactory(
+		rerankMetricsFactory, eventFactory, "rerank", tracing.RerankTracer(), endpointspec.RerankEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Cohere, "/v2/rerank"), extproc.NewFactory(
 		rerankMetricsFactory, eventFactory, "rerank", tracing.RerankTracer(), endpointspec.RerankEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/models"), extproc.NewModelsProcessor)
